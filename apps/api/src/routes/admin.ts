@@ -1,0 +1,24 @@
+import { Router } from 'express';
+import { auth } from '../middleware/auth';
+import { db } from '../db';
+import { shipOrder } from '../services/fulfillment';
+import { sendWhatsAppText } from '../integrations/whatsapp';
+
+const r = Router(); r.use(auth);
+r.get('/stats', async (_, res) => { const [orders, donations, customers, conversations, pending] = await Promise.all([db.order.count(), db.donation.count(), db.user.count(), db.conversation.count(), db.order.count({ where: { paymentStatus: 'PENDING' } })]); const revenue = await db.order.aggregate({ where: { paymentStatus: 'PAID' }, _sum: { total: true } }); const donationTotal = await db.donation.aggregate({ where: { paymentStatus: 'PAID' }, _sum: { amount: true } }); res.json({ orders, donations, customers, conversations, pendingPayments: pending, revenue: revenue._sum.total || 0, donationTotal: donationTotal._sum.amount || 0 }); });
+r.get('/products', async (_, res) => res.json(await db.product.findMany({ orderBy: { createdAt: 'desc' } })));
+r.post('/products', async (req, res) => res.status(201).json(await db.product.create({ data: req.body })));
+r.patch('/products/:id', async (req, res) => res.json(await db.product.update({ where: { id: req.params.id }, data: req.body })));
+r.delete('/products/:id', async (req, res) => { await db.product.update({ where: { id: req.params.id }, data: { active: false } }); res.status(204).end(); });
+r.get('/orders', async (_, res) => res.json(await db.order.findMany({ include: { user: true, items: { include: { product: true } } }, orderBy: { createdAt: 'desc' } })));
+r.post('/orders/:id/ship', async (req, res) => { try { res.json(await shipOrder(req.params.id)); } catch (e: any) { res.status(400).json({ error: e.message }); } });
+r.get('/donations', async (_, res) => res.json(await db.donation.findMany({ include: { user: true }, orderBy: { createdAt: 'desc' } })));
+r.get('/customers', async (_, res) => res.json(await db.user.findMany({ include: { _count: { select: { orders: true, donations: true, conversations: true } } }, orderBy: { createdAt: 'desc' } })));
+r.get('/conversations', async (_, res) => res.json(await db.conversation.findMany({ include: { user: true, messages: { orderBy: { createdAt: 'desc' }, take: 20 }, supportTickets: { where: { status: 'OPEN' } } }, orderBy: { lastMessageAt: 'desc' } })));
+r.patch('/conversations/:id', async (req, res) => res.json(await db.conversation.update({ where: { id: req.params.id }, data: { mode: req.body.mode } })));
+r.get('/knowledge', async (_, res) => res.json(await db.knowledgeDocument.findMany({ orderBy: { updatedAt: 'desc' } })));
+r.post('/knowledge', async (req, res) => res.status(201).json(await db.knowledgeDocument.create({ data: { title: req.body.title, content: req.body.content, active: req.body.active ?? true } })));
+r.patch('/knowledge/:id', async (req, res) => res.json(await db.knowledgeDocument.update({ where: { id: req.params.id }, data: req.body })));
+r.get('/tickets', async (_, res) => res.json(await db.supportTicket.findMany({ include: { conversation: { include: { user: true } } }, orderBy: { createdAt: 'desc' } })));
+r.patch('/tickets/:id', async (req, res) => res.json(await db.supportTicket.update({ where: { id: req.params.id }, data: { status: req.body.status } })));
+export default r;

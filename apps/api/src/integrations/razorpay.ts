@@ -1,0 +1,5 @@
+import Razorpay from 'razorpay'; import crypto from 'crypto'; import { env } from '../config';
+const rp=env.RAZORPAY_KEY_ID&&env.RAZORPAY_KEY_SECRET?new Razorpay({key_id:env.RAZORPAY_KEY_ID,key_secret:env.RAZORPAY_KEY_SECRET}):null;
+export async function createPayment(amount:number,receipt:string){if(!rp||env.MOCK_PROVIDERS)return {id:`mock_${receipt}`,amount,currency:'INR',receipt}; return rp.orders.create({amount:amount*100,currency:'INR',receipt,payment_capture:true});}
+export function verifyCheckoutSignature(orderId:string,paymentId:string,signature:string){ if(!env.RAZORPAY_KEY_SECRET) return env.MOCK_PROVIDERS; const h=crypto.createHmac('sha256',env.RAZORPAY_KEY_SECRET).update(`${orderId}|${paymentId}`).digest('hex'); return h===signature; }
+export function verifySignature(body:string,signature:string){if(!env.RAZORPAY_WEBHOOK_SECRET)return env.MOCK_PROVIDERS;const h=crypto.createHmac('sha256',env.RAZORPAY_WEBHOOK_SECRET).update(body).digest('hex');return crypto.timingSafeEqual(Buffer.from(h),Buffer.from(signature));}

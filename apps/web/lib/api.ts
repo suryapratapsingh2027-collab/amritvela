@@ -1,0 +1,2 @@
+export const API=process.env.NEXT_PUBLIC_API_URL||'http://localhost:4000';
+export async function api<T>(path:string,options:RequestInit={}){const token=typeof window!=='undefined'?localStorage.getItem('trust_token'):null;const r=await fetch(`${API}${path}`,{...options,headers:{'Content-Type':'application/json',...(token?{Authorization:`Bearer ${token}`}:{})}});if(!r.ok)throw new Error(await r.text());return r.status===204?null:r.json() as Promise<T>}
