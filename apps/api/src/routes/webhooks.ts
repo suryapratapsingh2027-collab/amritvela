@@ -82,6 +82,7 @@ console.log(
     }
 
     const user = await db.user.upsert({
+      console.log('[WHATSAPP] User created/found');
       where: { phone },
       update: {},
       create: { phone },
@@ -99,6 +100,7 @@ console.log(
     }
 
     await db.message.create({
+      console.log('[WHATSAPP] Incoming message saved');
       data: {
         conversationId: conversation.id,
         direction: 'IN',
@@ -109,7 +111,9 @@ console.log(
       },
     });
 
+    console.log('[WHATSAPP] Calling AI');
     const out = await answer(text, await knowledge());
+    console.log('[WHATSAPP] AI completed; intent:', out.intent);
 
     await db.conversation.update({
       where: { id: conversation.id },
@@ -141,7 +145,9 @@ console.log(
     }
 
     // Send the generated answer to the WhatsApp customer.
+    console.log('[WHATSAPP] Sending reply');
     await sendWhatsAppText(phone, out.text);
+    console.log('[WHATSAPP] Reply sent successfully');
 
     await db.message.create({
       data: {
