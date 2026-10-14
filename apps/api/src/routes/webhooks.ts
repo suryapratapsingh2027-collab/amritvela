@@ -82,11 +82,11 @@ console.log(
     }
 
     const user = await db.user.upsert({
-      console.log('[WHATSAPP] User created/found');
       where: { phone },
       update: {},
       create: { phone },
     });
+     console.log('[WHATSAPP] User created/found');
 
     let conversation = await db.conversation.findFirst({
       where: { userId: user.id },
@@ -100,7 +100,6 @@ console.log(
     }
 
     await db.message.create({
-      console.log('[WHATSAPP] Incoming message saved');
       data: {
         conversationId: conversation.id,
         direction: 'IN',
@@ -110,6 +109,7 @@ console.log(
           : undefined,
       },
     });
+    console.log('[WHATSAPP] Incoming message saved');
 
     console.log('[WHATSAPP] Calling AI');
     const out = await answer(text, await knowledge());
