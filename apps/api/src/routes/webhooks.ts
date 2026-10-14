@@ -33,6 +33,8 @@ r.get('/whatsapp', (req: Request, res: Response) => {
  * WHATSAPP INCOMING MESSAGES
  */
 r.post('/whatsapp', async (req: Request, res: Response) => {
+  console.log('[WHATSAPP WEBHOOK] POST received');
+console.log('[WHATSAPP WEBHOOK] Object:', req.body?.object);
   const value = req.body?.entry?.[0]?.changes?.[0]?.value;
   const message = value?.messages?.[0];
 
