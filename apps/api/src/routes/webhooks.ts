@@ -11,7 +11,6 @@ const r = Router();
 
 /**
  * WHATSAPP WEBHOOK VERIFICATION
- * Meta sends a GET request when verifying the callback URL.
  */
 r.get('/whatsapp', (req: Request, res: Response) => {
   const mode = req.query['hub.mode'];
@@ -23,9 +22,11 @@ r.get('/whatsapp', (req: Request, res: Response) => {
     token === env.WHATSAPP_VERIFY_TOKEN &&
     typeof challenge === 'string'
   ) {
+    console.log('[WHATSAPP WEBHOOK] Verification successful');
     return res.status(200).send(challenge);
   }
 
+  console.error('[WHATSAPP WEBHOOK] Verification failed');
   return res.sendStatus(403);
 });
 
@@ -33,40 +34,46 @@ r.get('/whatsapp', (req: Request, res: Response) => {
  * WHATSAPP INCOMING MESSAGES
  */
 r.post('/whatsapp', async (req: Request, res: Response) => {
-  console.log('[WHATSAPP WEBHOOK] POST received');
-  console.log('[WHATSAPP WEBHOOK] Object:', req.body?.object);
-  
-  const value = req.body?.entry?.[0]?.changes?.[0]?.value;
-  
-  console.log('[WHATSAPP WEBHOOK] Value found:', Boolean(value));
-  console.log(
-    '[WHATSAPP WEBHOOK] Message count:',
-    value?.messages?.length ?? 0
-  );
-console.log(
-  '[WHATSAPP WEBHOOK] Message type:',
-  value?.messages?.[0]?.type ?? 'none'
-);
-  const message = value?.messages?.[0];
-
-  // Meta also sends status updates through this webhook.
-  // Acknowledge events that are not incoming messages.
-  if (!message?.from || message.type !== 'text') {
-    return res.sendStatus(200);
-  }
-
-  const phone = String(message.from);
-  const text = String(message.text?.body || '').trim();
-  const whatsappMessageId = String(message.id || '');
-
-  if (!text) {
-    return res.sendStatus(200);
-  }
+  console.log('[WHATSAPP 1] POST received');
+  console.log('[WHATSAPP 2] Object:', req.body?.object);
 
   try {
-    // Avoid replying more than once to the same WhatsApp message.
-    // This uses the existing message table and metadata field.
+    const value = req.body?.entry?.[0]?.changes?.[0]?.value;
+    const message = value?.messages?.[0];
+
+    console.log('[WHATSAPP 3] Value found:', Boolean(value));
+    console.log(
+      '[WHATSAPP 4] Message count:',
+      value?.messages?.length ?? 0
+    );
+    console.log(
+      '[WHATSAPP 5] Message type:',
+      message?.type ?? 'none'
+    );
+
+    // Status notifications do not contain an incoming customer message.
+    if (!message?.from || message.type !== 'text') {
+      console.log(
+        '[WHATSAPP] Skipping status/non-text event'
+      );
+      return res.sendStatus(200);
+    }
+
+    const phone = String(message.from);
+    const text = String(message.text?.body || '').trim();
+    const whatsappMessageId = String(message.id || '');
+
+    console.log('[WHATSAPP 6] Incoming text validated');
+
+    if (!text) {
+      console.log('[WHATSAPP] Empty text; skipping');
+      return res.sendStatus(200);
+    }
+
+    // Avoid processing the same incoming message twice.
     if (whatsappMessageId) {
+      console.log('[WHATSAPP 7] Checking duplicate message');
+
       const duplicate = await db.message.findFirst({
         where: {
           metadata: {
@@ -77,16 +84,26 @@ console.log(
       });
 
       if (duplicate) {
+        console.log('[WHATSAPP] Duplicate message; skipping');
         return res.sendStatus(200);
       }
+
+      console.log('[WHATSAPP 8] Duplicate check passed');
     }
+
+    // Find or create customer.
+    console.log('[WHATSAPP 9] Finding/creating user');
 
     const user = await db.user.upsert({
       where: { phone },
       update: {},
       create: { phone },
     });
-     console.log('[WHATSAPP] User created/found');
+
+    console.log('[WHATSAPP 10] User created/found:', user.id);
+
+    // Find or create conversation.
+    console.log('[WHATSAPP 11] Finding conversation');
 
     let conversation = await db.conversation.findFirst({
       where: { userId: user.id },
@@ -94,10 +111,25 @@ console.log(
     });
 
     if (!conversation) {
+      console.log('[WHATSAPP 12] Creating conversation');
+
       conversation = await db.conversation.create({
         data: { userId: user.id },
       });
+
+      console.log(
+        '[WHATSAPP 13] Conversation created:',
+        conversation.id
+      );
+    } else {
+      console.log(
+        '[WHATSAPP 13] Existing conversation:',
+        conversation.id
+      );
     }
+
+    // Save incoming message.
+    console.log('[WHATSAPP 14] Saving incoming message');
 
     await db.message.create({
       data: {
@@ -109,11 +141,34 @@ console.log(
           : undefined,
       },
     });
-    console.log('[WHATSAPP] Incoming message saved');
 
-    console.log('[WHATSAPP] Calling AI');
-    const out = await answer(text, await knowledge());
-    console.log('[WHATSAPP] AI completed; intent:', out.intent);
+    console.log('[WHATSAPP 15] Incoming message saved');
+
+    // Generate AI response.
+    console.log('[WHATSAPP 16] Loading AI knowledge');
+
+    const knowledgeData = await knowledge();
+
+    console.log('[WHATSAPP 17] Knowledge loaded');
+    console.log('[WHATSAPP 18] Calling AI');
+
+    const out = await answer(text, knowledgeData);
+
+    console.log(
+      '[WHATSAPP 19] AI completed; intent:',
+      out.intent
+    );
+    console.log(
+      '[WHATSAPP 20] AI response available:',
+      Boolean(out.text?.trim())
+    );
+
+    if (!out.text?.trim()) {
+      throw new Error('AI returned an empty response');
+    }
+
+    // Update conversation.
+    console.log('[WHATSAPP 21] Updating conversation');
 
     await db.conversation.update({
       where: { id: conversation.id },
@@ -126,7 +181,12 @@ console.log(
       },
     });
 
+    console.log('[WHATSAPP 22] Conversation updated');
+
+    // Create a support ticket when human support is requested.
     if (out.intent === 'HUMAN') {
+      console.log('[WHATSAPP 23] Checking support ticket');
+
       const existingTicket = await db.supportTicket.findFirst({
         where: {
           conversationId: conversation.id,
@@ -141,29 +201,63 @@ console.log(
             subject: 'Human support requested',
           },
         });
+
+        console.log('[WHATSAPP 24] Support ticket created');
+      } else {
+        console.log('[WHATSAPP 24] Open ticket already exists');
       }
     }
 
-    // Send the generated answer to the WhatsApp customer.
-    console.log('[WHATSAPP] Sending reply');
-    await sendWhatsAppText(phone, out.text);
-    console.log('[WHATSAPP] Reply sent successfully');
+    // Send WhatsApp reply.
+    console.log('[WHATSAPP 25] Sending WhatsApp reply');
+
+    const sendResult = await sendWhatsAppText(
+      phone,
+      out.text
+    );
+
+    console.log(
+      '[WHATSAPP 26] WhatsApp API call returned:',
+      JSON.stringify(sendResult)
+    );
+
+    // Save outgoing message after sending.
+    console.log('[WHATSAPP 27] Saving outgoing message');
 
     await db.message.create({
       data: {
         conversationId: conversation.id,
         direction: 'OUT',
         text: out.text,
-        metadata: { intent: out.intent },
+        metadata: {
+          intent: out.intent,
+          whatsappMessageId,
+        },
       },
     });
 
-    return res.sendStatus(200);
-  } catch (error) {
-    console.error('WhatsApp webhook processing failed:', error);
+    console.log('[WHATSAPP 28] Outgoing message saved');
+    console.log('[WHATSAPP SUCCESS] Processing completed');
 
-    // A non-2xx response allows Meta to retry the webhook.
-    // Duplicate protection above helps prevent repeat processing.
+    return res.sendStatus(200);
+  } catch (error: any) {
+    console.error('[WHATSAPP ERROR] Processing failed');
+    console.error('[WHATSAPP ERROR] Message:', error?.message);
+    console.error('[WHATSAPP ERROR] Code:', error?.code);
+    console.error('[WHATSAPP ERROR] Stack:', error?.stack);
+
+    if (error?.response) {
+      console.error(
+        '[WHATSAPP ERROR] HTTP status:',
+        error.response.status
+      );
+      console.error(
+        '[WHATSAPP ERROR] API response:',
+        JSON.stringify(error.response.data)
+      );
+    }
+
+    // Return 500 so Meta can retry transient failures.
     return res.sendStatus(500);
   }
 });
@@ -173,7 +267,9 @@ console.log(
  */
 r.post('/razorpay', async (req: Request, res: Response) => {
   try {
-    const sig = String(req.headers['x-razorpay-signature'] || '');
+    const sig = String(
+      req.headers['x-razorpay-signature'] || ''
+    );
 
     if (
       !verifySignature(
@@ -235,7 +331,8 @@ r.post('/razorpay', async (req: Request, res: Response) => {
 
     return res.sendStatus(200);
   } catch (error: any) {
-    console.error('Razorpay webhook failed:', error);
+    console.error('[RAZORPAY WEBHOOK ERROR]', error);
+
     return res.status(500).json({
       error: error.message || 'Razorpay webhook failed',
     });
@@ -301,7 +398,10 @@ r.post('/shiprocket', async (req: Request, res: Response) => {
             user.phone,
             `Order ${order.orderNumber}: ${status.toLowerCase()}.`
           ).catch((error) => {
-            console.error('Shiprocket WhatsApp notification failed:', error);
+            console.error(
+              '[SHIPROCKET WHATSAPP ERROR]',
+              error?.response?.data || error?.message || error
+            );
           });
         }
       }
@@ -309,7 +409,7 @@ r.post('/shiprocket', async (req: Request, res: Response) => {
 
     return res.sendStatus(200);
   } catch (error) {
-    console.error('Shiprocket webhook failed:', error);
+    console.error('[SHIPROCKET WEBHOOK ERROR]', error);
     return res.sendStatus(200);
   }
 });
