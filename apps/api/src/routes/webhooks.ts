@@ -22,11 +22,11 @@ r.get('/whatsapp', (req: Request, res: Response) => {
     token === env.WHATSAPP_VERIFY_TOKEN &&
     typeof challenge === 'string'
   ) {
-    console.log('[WHATSAPP WEBHOOK] Verification successful');
+    console.log('[WHATSAPP] Verification successful');
     return res.status(200).send(challenge);
   }
 
-  console.error('[WHATSAPP WEBHOOK] Verification failed');
+  console.error('[WHATSAPP] Verification failed');
   return res.sendStatus(403);
 });
 
@@ -35,12 +35,12 @@ r.get('/whatsapp', (req: Request, res: Response) => {
  */
 r.post('/whatsapp', async (req: Request, res: Response) => {
   console.log('[WHATSAPP 1] POST received');
-  console.log('[WHATSAPP 2] Object:', req.body?.object);
 
   try {
     const value = req.body?.entry?.[0]?.changes?.[0]?.value;
     const message = value?.messages?.[0];
 
+    console.log('[WHATSAPP 2] Object:', req.body?.object);
     console.log('[WHATSAPP 3] Value found:', Boolean(value));
     console.log(
       '[WHATSAPP 4] Message count:',
@@ -51,11 +51,9 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
       message?.type ?? 'none'
     );
 
-    // Status notifications do not contain an incoming customer message.
+    // Ignore delivery/read status events and unsupported message types.
     if (!message?.from || message.type !== 'text') {
-      console.log(
-        '[WHATSAPP] Skipping status/non-text event'
-      );
+      console.log('[WHATSAPP] Ignoring status/non-text event');
       return res.sendStatus(200);
     }
 
@@ -63,19 +61,30 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
     const text = String(message.text?.body || '').trim();
     const whatsappMessageId = String(message.id || '');
 
-    console.log('[WHATSAPP 6] Incoming text validated');
-
     if (!text) {
-      console.log('[WHATSAPP] Empty text; skipping');
+      console.log('[WHATSAPP] Empty message; skipping');
       return res.sendStatus(200);
     }
 
-    // Avoid processing the same incoming message twice.
-    if (whatsappMessageId) {
-      console.log('[WHATSAPP 7] Checking duplicate message');
+    console.log('[WHATSAPP 6] Incoming text validated');
+    console.log(
+      '[WHATSAPP 7] Message ID:',
+      whatsappMessageId || '(missing)'
+    );
 
-      const duplicate = await db.message.findFirst({
+    /*
+     * IMPORTANT:
+     * Skip only when an OUT message confirms that a reply was already
+     * sent for this WhatsApp message ID.
+     *
+     * An IN record alone must not block retries after AI/send failures.
+     */
+    if (whatsappMessageId) {
+      console.log('[WHATSAPP 8] Checking for an existing reply');
+
+      const existingReply = await db.message.findFirst({
         where: {
+          direction: 'OUT',
           metadata: {
             path: ['whatsappMessageId'],
             equals: whatsappMessageId,
@@ -83,16 +92,18 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
         },
       });
 
-      if (duplicate) {
-        console.log('[WHATSAPP] Duplicate message; skipping');
+      if (existingReply) {
+        console.log(
+          '[WHATSAPP] Reply already recorded; skipping duplicate'
+        );
         return res.sendStatus(200);
       }
 
-      console.log('[WHATSAPP 8] Duplicate check passed');
+      console.log('[WHATSAPP 9] No previous reply found');
     }
 
-    // Find or create customer.
-    console.log('[WHATSAPP 9] Finding/creating user');
+    // Find or create the customer.
+    console.log('[WHATSAPP 10] Finding/creating user');
 
     const user = await db.user.upsert({
       where: { phone },
@@ -100,11 +111,9 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
       create: { phone },
     });
 
-    console.log('[WHATSAPP 10] User created/found:', user.id);
+    console.log('[WHATSAPP 11] User ready:', user.id);
 
-    // Find or create conversation.
-    console.log('[WHATSAPP 11] Finding conversation');
-
+    // Find or create the conversation.
     let conversation = await db.conversation.findFirst({
       where: { userId: user.id },
       orderBy: { lastMessageAt: 'desc' },
@@ -116,33 +125,53 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
       conversation = await db.conversation.create({
         data: { userId: user.id },
       });
-
-      console.log(
-        '[WHATSAPP 13] Conversation created:',
-        conversation.id
-      );
-    } else {
-      console.log(
-        '[WHATSAPP 13] Existing conversation:',
-        conversation.id
-      );
     }
 
-    // Save incoming message.
-    console.log('[WHATSAPP 14] Saving incoming message');
+    console.log(
+      '[WHATSAPP 13] Conversation ready:',
+      conversation.id
+    );
 
-    await db.message.create({
-      data: {
-        conversationId: conversation.id,
-        direction: 'IN',
-        text,
-        metadata: whatsappMessageId
-          ? { whatsappMessageId }
-          : undefined,
-      },
-    });
+    /*
+     * Save the incoming message only if it has not already been saved.
+     * This allows a retry to continue after an earlier processing failure.
+     */
+    let incomingAlreadySaved = false;
 
-    console.log('[WHATSAPP 15] Incoming message saved');
+    if (whatsappMessageId) {
+      const existingIncoming = await db.message.findFirst({
+        where: {
+          direction: 'IN',
+          metadata: {
+            path: ['whatsappMessageId'],
+            equals: whatsappMessageId,
+          },
+        },
+      });
+
+      incomingAlreadySaved = Boolean(existingIncoming);
+    }
+
+    if (!incomingAlreadySaved) {
+      console.log('[WHATSAPP 14] Saving incoming message');
+
+      await db.message.create({
+        data: {
+          conversationId: conversation.id,
+          direction: 'IN',
+          text,
+          metadata: whatsappMessageId
+            ? { whatsappMessageId }
+            : undefined,
+        },
+      });
+
+      console.log('[WHATSAPP 15] Incoming message saved');
+    } else {
+      console.log(
+        '[WHATSAPP 15] Incoming message already saved; continuing'
+      );
+    }
 
     // Generate AI response.
     console.log('[WHATSAPP 16] Loading AI knowledge');
@@ -158,17 +187,12 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
       '[WHATSAPP 19] AI completed; intent:',
       out.intent
     );
-    console.log(
-      '[WHATSAPP 20] AI response available:',
-      Boolean(out.text?.trim())
-    );
 
     if (!out.text?.trim()) {
       throw new Error('AI returned an empty response');
     }
 
-    // Update conversation.
-    console.log('[WHATSAPP 21] Updating conversation');
+    console.log('[WHATSAPP 20] Updating conversation');
 
     await db.conversation.update({
       where: { id: conversation.id },
@@ -181,12 +205,10 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
       },
     });
 
-    console.log('[WHATSAPP 22] Conversation updated');
+    console.log('[WHATSAPP 21] Conversation updated');
 
-    // Create a support ticket when human support is requested.
+    // Create a support ticket if human support is requested.
     if (out.intent === 'HUMAN') {
-      console.log('[WHATSAPP 23] Checking support ticket');
-
       const existingTicket = await db.supportTicket.findFirst({
         where: {
           conversationId: conversation.id,
@@ -202,27 +224,25 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
           },
         });
 
-        console.log('[WHATSAPP 24] Support ticket created');
-      } else {
-        console.log('[WHATSAPP 24] Open ticket already exists');
+        console.log('[WHATSAPP 22] Support ticket created');
       }
     }
 
-    // Send WhatsApp reply.
-    console.log('[WHATSAPP 25] Sending WhatsApp reply');
+    // Send the reply.
+    console.log('[WHATSAPP 23] Sending WhatsApp reply');
 
-    const sendResult = await sendWhatsAppText(
-      phone,
-      out.text
-    );
+    const sendResult = await sendWhatsAppText(phone, out.text);
 
     console.log(
-      '[WHATSAPP 26] WhatsApp API call returned:',
+      '[WHATSAPP 24] WhatsApp API returned:',
       JSON.stringify(sendResult)
     );
 
-    // Save outgoing message after sending.
-    console.log('[WHATSAPP 27] Saving outgoing message');
+    /*
+     * Save OUT only after the send function succeeds.
+     * Keep the incoming WhatsApp ID on the OUT record for idempotency.
+     */
+    console.log('[WHATSAPP 25] Saving outgoing message');
 
     await db.message.create({
       data: {
@@ -236,7 +256,7 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
       },
     });
 
-    console.log('[WHATSAPP 28] Outgoing message saved');
+    console.log('[WHATSAPP 26] Outgoing message saved');
     console.log('[WHATSAPP SUCCESS] Processing completed');
 
     return res.sendStatus(200);
@@ -244,7 +264,6 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
     console.error('[WHATSAPP ERROR] Processing failed');
     console.error('[WHATSAPP ERROR] Message:', error?.message);
     console.error('[WHATSAPP ERROR] Code:', error?.code);
-    console.error('[WHATSAPP ERROR] Stack:', error?.stack);
 
     if (error?.response) {
       console.error(
@@ -257,7 +276,8 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
       );
     }
 
-    // Return 500 so Meta can retry transient failures.
+    console.error('[WHATSAPP ERROR] Stack:', error?.stack);
+
     return res.sendStatus(500);
   }
 });
