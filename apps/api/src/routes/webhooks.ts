@@ -58,6 +58,8 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
     }
 
     const phone = String(message.from);
+    console.log('[WHATSAPP DEBUG] Incoming sender:', phone);
+console.log('[WHATSAPP DEBUG] Business phone number ID:', value?.metadata?.phone_number_id);
     const text = String(message.text?.body || '').trim();
     const whatsappMessageId = String(message.id || '');
 
