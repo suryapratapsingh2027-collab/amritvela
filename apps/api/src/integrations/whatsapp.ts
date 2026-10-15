@@ -16,12 +16,25 @@ function isMockMode(): boolean {
 
 function logWhatsAppError(operation: string, error: unknown): void {
   if (axios.isAxiosError(error)) {
+    const responseData = error.response?.data;
+
     console.error(
       `[WhatsApp] ${operation} failed:`,
       JSON.stringify(
         {
           status: error.response?.status ?? null,
-          responseData: error.response?.data ?? null,
+          responseData: responseData ?? null,
+          metaError: responseData?.error
+            ? {
+                message: responseData.error.message ?? null,
+                type: responseData.error.type ?? null,
+                code: responseData.error.code ?? null,
+                error_subcode:
+                  responseData.error.error_subcode ?? null,
+                fbtrace_id:
+                  responseData.error.fbtrace_id ?? null,
+              }
+            : null,
           message: error.message,
           code: error.code ?? null,
         },
@@ -29,6 +42,7 @@ function logWhatsAppError(operation: string, error: unknown): void {
         2
       )
     );
+
     return;
   }
 
