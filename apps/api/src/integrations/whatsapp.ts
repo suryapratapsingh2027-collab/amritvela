@@ -21,10 +21,9 @@ function logWhatsAppError(operation: string, error: unknown): void {
       JSON.stringify(
         {
           status: error.response?.status ?? null,
-          error: error.response?.data?.error ?? {
-            message: error.message,
-            code: error.code ?? null,
-          },
+          responseData: error.response?.data ?? null,
+          message: error.message,
+          code: error.code ?? null,
         },
         null,
         2
