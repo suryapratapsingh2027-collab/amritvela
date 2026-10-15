@@ -73,6 +73,11 @@ app.use('/api/assistant', assistant);
 app.use('/api/media', media);
 
 // Webhooks
+app.use('/webhooks', (req, _res, next) => {
+  console.log('[WEBHOOK REQUEST]', req.method, req.originalUrl);
+  next();
+});
+
 app.use('/webhooks', webhooks);
 
 // Error handler
