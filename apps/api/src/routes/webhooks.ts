@@ -1,5 +1,6 @@
 
 import { Router, Request, Response } from 'express';
+import crypto from 'crypto';
 import { db } from '../db';
 import { env } from '../config';
 import { verifySignature } from '../integrations/razorpay';
@@ -190,18 +191,50 @@ console.log('[WHATSAPP DEBUG] Business phone number ID:', value?.metadata?.phone
       return res.sendStatus(200);
     }
 
-    // Explicit donation requests with an amount create a real backend Payment Link.
-    // Keep the normal AI flow for donation questions without an amount and all other intents.
-    const donationIntent = /\b(donat(?:e|ion|ing)?|daan|chanda|contribut(?:e|ion)?|योगदान|दान)\b/i.test(text);
-    const amountMatch = text.match(/(?:₹|rs\.?|inr)?\s*(\d+(?:,\d{3})*(?:\.\d{1,2})?)(?:\s*(?:rs\.?|rupees?|rupaye|inr))?/i);
-    if (donationIntent && amountMatch) {
+    // Donation requests can span multiple WhatsApp messages. Example:
+    // "Mujhe donation bhi karna hai" followed by "General fund 500 rupay ka".
+    const recentIncoming = await db.message.findMany({
+      where: { conversationId: conversation.id, direction: 'IN' },
+      orderBy: { createdAt: 'desc' },
+      take: 8,
+      select: { text: true },
+    });
+    const donationIntentPattern = /\b(donat(?:e|ion|ing)?|daan|chanda|contribut(?:e|ion)?|fund|yogdaan|योगदान|दान)\b/i;
+    const hasDonationContext = recentIncoming.some((item) =>
+      donationIntentPattern.test(String(item.text || ''))
+    );
+    const amountMatch = text.match(/(?:₹\s*|\b(?:rs\.?|inr)\s*)?(\d{1,7}(?:,\d{3})*(?:\.\d{1,2})?)(?:\s*(?:rs\.?|rupees?|rupaye|रुपये|रुपए|inr))?/i);
+
+    if (hasDonationContext && amountMatch) {
       const amount = Number(amountMatch[1].replace(/,/g, ''));
-      const user = await db.user.findUnique({ where: { phone } });
-      const result = await createAndSendDonationLink({ phone, name: user?.name, email: user?.email, amount });
-      await db.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
-      await db.message.create({ data: { conversationId: conversation.id, direction: 'OUT', text: result.message, metadata: { intent: 'DONATION', whatsappMessageId, donationReference: result.reference, paymentLinkId: result.paymentLinkId } } });
-      console.log('[WHATSAPP DONATION] Payment link created and sent:', result.reference);
-      return res.sendStatus(200);
+      if (Number.isFinite(amount) && amount >= 1 && amount <= 10000000) {
+        const donor = await db.user.findUnique({ where: { phone } });
+        const result = await createAndSendDonationLink({
+          phone,
+          name: donor?.name,
+          email: donor?.email,
+          amount,
+        });
+        await db.conversation.update({
+          where: { id: conversation.id },
+          data: { lastMessageAt: new Date() },
+        });
+        await db.message.create({
+          data: {
+            conversationId: conversation.id,
+            direction: 'OUT',
+            text: result.message,
+            metadata: {
+              intent: 'DONATION',
+              whatsappMessageId,
+              donationReference: result.reference,
+              paymentLinkId: result.paymentLinkId,
+            },
+          },
+        });
+        console.log('[WHATSAPP DONATION] Payment link created:', result.reference);
+        return res.sendStatus(200);
+      }
     }
 
     // Generate AI response.
@@ -332,20 +365,12 @@ r.post('/razorpay', async (req: Request, res: Response) => {
     }
 
     const eventId = String(
-      req.body?.id || `${req.body?.event}-${Date.now()}`
+      req.body?.id || crypto.createHash('sha256').update(JSON.stringify(req.body)).digest('hex')
     );
 
     if (await db.webhookEvent.findUnique({ where: { eventId } })) {
       return res.sendStatus(200);
     }
-
-    await db.webhookEvent.create({
-      data: {
-        provider: 'razorpay',
-        eventId,
-        payload: req.body,
-      },
-    });
 
     const event = req.body?.event;
     const payment = req.body?.payload?.payment?.entity;
@@ -412,6 +437,11 @@ r.post('/razorpay', async (req: Request, res: Response) => {
         data: { paymentStatus: 'FAILED' },
       });
     }
+
+    // Save only after reconciliation succeeds, so transient failures can be retried.
+    await db.webhookEvent.create({
+      data: { provider: 'razorpay', eventId, payload: req.body },
+    });
 
     return res.sendStatus(200);
   } catch (error: any) {
@@ -499,3 +529,4 @@ r.post('/shiprocket', async (req: Request, res: Response) => {
 });
 
 export default r;
+// test
