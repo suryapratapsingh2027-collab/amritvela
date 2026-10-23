@@ -179,6 +179,18 @@ console.log('[WHATSAPP DEBUG] Business phone number ID:', value?.metadata?.phone
       );
     }
 
+    // Handle greetings before resuming any saved product-checkout step. A stale
+    // checkout prompt must never turn a plain "Hello" into a product list.
+    if (/^(hi|hello|hey|namaste|namaskar|नमस्ते|हेलो)[!.\s]*$/i.test(text)) {
+      const greetingReply = 'Namaste! Amrit Vela Trust mein aapka swagat hai. 🙏 Aapko donation, products/order, ya kisi aur jaankari mein madad chahiye?';
+      await sendWhatsAppText(phone, greetingReply);
+      await db.message.create({
+        data: { conversationId: conversation.id, direction: 'OUT', text: greetingReply, metadata: { intent: 'GREETING', whatsappMessageId } },
+      });
+      await db.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return res.sendStatus(200);
+    }
+
     // Deterministic product checkout runs before the general AI response. It uses
     // saved conversation messages so a multi-message WhatsApp checkout survives restarts.
     const shopReply = await handleWhatsAppShop(phone, text, conversation.id);
@@ -371,8 +383,9 @@ r.post('/razorpay', async (req: Request, res: Response) => {
     // Do not blindly skip an already-seen event: older deployments may have
     // stored an event before its business record was reconciled. The handlers
     // below are made idempotent before side effects are sent.
-    const event = req.body?.event;
+    const event = String(req.body?.event || 'unknown');
     const payment = req.body?.payload?.payment?.entity;
+    console.log('[RAZORPAY WEBHOOK] Received event:', event, 'eventId:', eventId);
 
     if (event === 'payment.captured' && payment) {
       const orders = await db.order.findMany({
@@ -439,6 +452,7 @@ r.post('/razorpay', async (req: Request, res: Response) => {
       const linkedPayment = req.body?.payload?.payment?.entity;
       const paymentLinkId = String(paymentLink?.id || linkedPayment?.payment_link_id || '');
       if (paymentLinkId) {
+        console.log('[RAZORPAY WEBHOOK] Payment Link paid:', paymentLinkId, 'amount_paid:', paymentLink?.amount_paid, 'paymentId:', linkedPayment?.id);
         const linkedOrder = await db.order.findFirst({ where: { razorpayOrderId: paymentLinkId }, include: { user: true } });
         if (linkedOrder && linkedOrder.paymentStatus !== 'PAID') {
           const paidAmount = Number(paymentLink?.amount_paid ?? linkedPayment?.amount ?? 0);
@@ -456,6 +470,7 @@ r.post('/razorpay', async (req: Request, res: Response) => {
             : { razorpayOrderId: paymentLinkId },
           include: { user: true },
         });
+        if (!donation) console.error('[RAZORPAY WEBHOOK] No donation matched Payment Link:', paymentLinkId, 'notes.donationId:', donationId || '(missing)');
         if (donation && donation.paymentStatus !== 'PAID') {
           const paidAmount = Number(paymentLink?.amount_paid ?? linkedPayment?.amount ?? 0);
           if (paidAmount >= donation.amount * 100) {

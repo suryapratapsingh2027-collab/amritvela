@@ -30,3 +30,10 @@
 - After deploying, run `npm install` (or `npm ci` once a lockfile is generated), then `npm run prisma:generate`, `npm run build`, and test the Razorpay webhook in a staging environment.
 - The already-stored historical `payment.captured` event shown in the incident did not include `payment_link_id`; code changes alone cannot infer a missing Payment Link ID from that old payload. The ₹500 donation should be reconciled only after checking the payment/link in Razorpay's authenticated dashboard/API. Do not ask the donor to pay again or manually mark it paid without verification.
 - This is a targeted source audit of the backend files above, not a claim that every runtime integration has been end-to-end tested. Provider credentials and live webhooks were not available here.
+
+
+## Follow-up fixes after user-reported live symptoms (2026-10-23)
+- Added a deterministic greeting handler before the persisted product checkout handler. Plain `Hello`/`Hi`/`Namaste` now gets a trust welcome message rather than being interpreted as a product selection because of stale conversation state.
+- Added Razorpay webhook event and Payment Link reconciliation diagnostics so Render logs reveal which event was delivered and whether the link/donation matched.
+- Fixed the `req.params.id` TypeScript issue in `src/routes/assistant.ts` by converting it to a string.
+- These source changes do not prove the production webhook configuration is correct. The Razorpay dashboard must have the deployed `/api/webhooks/razorpay` URL (confirm actual mount path) and the `payment_link.paid` event enabled; after deploy, check logs for `[RAZORPAY WEBHOOK] Received event: payment_link.paid`. Existing paid transactions still need a verified reconciliation path if their webhook event was missed.

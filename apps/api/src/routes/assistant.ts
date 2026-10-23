@@ -28,17 +28,7 @@ r.post('/', async (req, res) => {
 });
 
 r.get('/conversations/:id', auth, async (req, res) => {
-  const conversationId = String(req.params.id);
-
-const c = await db.conversation.findUnique({
-  where: { id: conversationId },
-  include: {
-    user: true,
-    messages: {
-      orderBy: { createdAt: 'asc' },
-    },
-  },
-});
+  const c = await db.conversation.findUnique({ where: { id: String(req.params.id) }, include: { user: true, messages: { orderBy: { createdAt: 'asc' } } } });
   if (!c) return res.status(404).json({ error: 'Conversation not found' });
   res.json(c);
 });
