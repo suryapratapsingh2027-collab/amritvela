@@ -26,7 +26,9 @@ r.post('/', async (req, res) => {
   try {
     const { phone, name, email, amount } = req.body || {};
     const value = Number(amount);
-    if (!phone || !Number.isFinite(value) || value <= 0) return res.status(400).json({ error: 'phone and positive amount required' });
+    if (!phone || !Number.isSafeInteger(value) || value <= 0 || value > 10000000) {
+      return res.status(400).json({ error: 'phone and a whole-number donation amount between ₹1 and ₹1,00,00,000 are required' });
+    }
     const user = await db.user.upsert({ where: { phone }, update: { name, email }, create: { phone, name, email } });
     const reference = `DON-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     const donation = await db.donation.create({ data: { reference, userId: user.id, amount: Math.round(value) } });

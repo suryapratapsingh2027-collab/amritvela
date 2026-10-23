@@ -368,10 +368,9 @@ r.post('/razorpay', async (req: Request, res: Response) => {
       req.body?.id || crypto.createHash('sha256').update(JSON.stringify(req.body)).digest('hex')
     );
 
-    if (await db.webhookEvent.findUnique({ where: { eventId } })) {
-      return res.sendStatus(200);
-    }
-
+    // Do not blindly skip an already-seen event: older deployments may have
+    // stored an event before its business record was reconciled. The handlers
+    // below are made idempotent before side effects are sent.
     const event = req.body?.event;
     const payment = req.body?.payload?.payment?.entity;
 
@@ -384,13 +383,53 @@ r.post('/razorpay', async (req: Request, res: Response) => {
         await markOrderPaid(order.id, payment.id);
       }
 
-      await db.donation.updateMany({
-        where: { razorpayOrderId: payment.order_id },
-        data: {
-          paymentStatus: 'PAID',
-          razorpayPaymentId: payment.id,
-        },
+      // Standard Checkout stores an Order ID; Payment Link payments may
+      // instead expose payment_link_id (and have a Payment Link ID stored).
+      const checkoutDonation = await db.donation.findFirst({
+        where: { razorpayOrderId: payment.order_id, paymentStatus: 'PENDING' },
+        include: { user: true },
       });
+      if (checkoutDonation) {
+        const amountMatches = Number(payment.amount || 0) >= checkoutDonation.amount * 100;
+        const currencyMatches = !payment.currency || payment.currency === checkoutDonation.currency;
+        if (amountMatches && currencyMatches) {
+          const claim = await db.donation.updateMany({
+            where: { id: checkoutDonation.id, paymentStatus: 'PENDING' },
+            data: { paymentStatus: 'PAID', razorpayPaymentId: String(payment.id) },
+          });
+          if (claim.count > 0) {
+            const updated = await db.donation.findUnique({ where: { id: checkoutDonation.id }, include: { user: true } });
+            if (updated) {
+              const receiptUrl = `${env.API_URL}/api/donations/${updated.id}/receipt`;
+              await db.donation.update({ where: { id: updated.id }, data: { receiptUrl } });
+              await sendWhatsAppText(updated.user.phone, `Dhanyavaad! Aapka ₹${updated.amount} donation confirm ho gaya hai. Reference: ${updated.reference}. Aapki PDF receipt ab bheji ja rahi hai.`);
+              await sendWhatsAppDocument(updated.user.phone, receiptUrl, `${updated.reference}.pdf`);
+            }
+          }
+        } else {
+          console.error('[RAZORPAY WEBHOOK] Checkout donation amount/currency mismatch:', checkoutDonation.reference);
+        }
+      }
+
+      const paymentLinkId = String(payment.payment_link_id || '');
+      if (paymentLinkId) {
+        const donation = await db.donation.findFirst({
+          where: { razorpayOrderId: paymentLinkId },
+          include: { user: true },
+        });
+        const paidAmount = Number(payment.amount || 0);
+        if (donation && donation.paymentStatus !== 'PAID' && paidAmount >= donation.amount * 100) {
+          const updated = await db.donation.update({
+            where: { id: donation.id },
+            data: { paymentStatus: 'PAID', razorpayPaymentId: String(payment.id) },
+            include: { user: true },
+          });
+          const receiptUrl = `${env.API_URL}/api/donations/${updated.id}/receipt`;
+          await db.donation.update({ where: { id: updated.id }, data: { receiptUrl } });
+          await sendWhatsAppText(updated.user.phone, `Dhanyavaad! Aapka ₹${updated.amount} donation confirm ho gaya hai. Reference: ${updated.reference}. Aapki PDF receipt ab bheji ja rahi hai.`);
+          await sendWhatsAppDocument(updated.user.phone, receiptUrl, `${updated.reference}.pdf`);
+        }
+      }
     }
 
     // Razorpay Payment Links emit payment_link.paid. Verify the webhook signature above,
@@ -410,7 +449,13 @@ r.post('/razorpay', async (req: Request, res: Response) => {
             console.error('[RAZORPAY WEBHOOK] Payment Link amount does not match order:', linkedOrder.orderNumber);
           }
         }
-        const donation = await db.donation.findFirst({ where: { razorpayOrderId: paymentLinkId }, include: { user: true } });
+        const donationId = String(paymentLink?.notes?.donationId || '');
+        const donation = await db.donation.findFirst({
+          where: donationId
+            ? { OR: [{ razorpayOrderId: paymentLinkId }, { id: donationId }] }
+            : { razorpayOrderId: paymentLinkId },
+          include: { user: true },
+        });
         if (donation && donation.paymentStatus !== 'PAID') {
           const paidAmount = Number(paymentLink?.amount_paid ?? linkedPayment?.amount ?? 0);
           if (paidAmount >= donation.amount * 100) {
@@ -428,19 +473,21 @@ r.post('/razorpay', async (req: Request, res: Response) => {
 
     if (event === 'payment.failed' && payment) {
       await db.order.updateMany({
-        where: { razorpayOrderId: payment.order_id },
+        where: { razorpayOrderId: payment.order_id, paymentStatus: 'PENDING' },
         data: { paymentStatus: 'FAILED' },
       });
 
       await db.donation.updateMany({
-        where: { razorpayOrderId: payment.order_id },
+        where: { razorpayOrderId: payment.order_id, paymentStatus: 'PENDING' },
         data: { paymentStatus: 'FAILED' },
       });
     }
 
     // Save only after reconciliation succeeds, so transient failures can be retried.
-    await db.webhookEvent.create({
-      data: { provider: 'razorpay', eventId, payload: req.body },
+    await db.webhookEvent.upsert({
+      where: { eventId },
+      create: { provider: 'razorpay', eventId, payload: req.body, processed: true },
+      update: { processed: true },
     });
 
     return res.sendStatus(200);

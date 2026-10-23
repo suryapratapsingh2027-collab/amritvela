@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../db';
 import { answer, knowledge } from '../services/ai';
 import { sendWhatsAppText } from '../integrations/whatsapp';
+import { auth } from '../middleware/auth';
 
 const r = Router();
 
@@ -26,13 +27,23 @@ r.post('/', async (req, res) => {
   } catch (e: any) { res.status(500).json({ error: e.message || 'Assistant failed' }); }
 });
 
-r.get('/conversations/:id', async (req, res) => {
-  const c = await db.conversation.findUnique({ where: { id: req.params.id }, include: { user: true, messages: { orderBy: { createdAt: 'asc' } } } });
+r.get('/conversations/:id', auth, async (req, res) => {
+  const conversationId = String(req.params.id);
+
+const c = await db.conversation.findUnique({
+  where: { id: conversationId },
+  include: {
+    user: true,
+    messages: {
+      orderBy: { createdAt: 'asc' },
+    },
+  },
+});
   if (!c) return res.status(404).json({ error: 'Conversation not found' });
   res.json(c);
 });
 
-r.post('/whatsapp-preview', async (req, res) => {
+r.post('/whatsapp-preview', auth, async (req, res) => {
   const { phone, message } = req.body || {};
   if (!phone || !message) return res.status(400).json({ error: 'phone and message are required' });
   const out = await answer(message, await knowledge(), String(phone));

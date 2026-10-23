@@ -22,6 +22,13 @@ export async function answer(
   const liveContext = await getLiveContext(text, intent, customerPhone);
   const trustedContext = [context.trim(), liveContext].filter(Boolean).join('\n\n');
 
+  // Transactional replies must be deterministic and grounded in database results.
+  // Do not let an LLM invent order/payment states, product prices, or claim that a
+  // support request was filed when the corresponding database action did not run.
+  if (intent === 'TRACK' || intent === 'DONATION' || intent === 'SHOP' || intent === 'HUMAN') {
+    return mockReply(text, intent, trustedContext);
+  }
+
   // Never pretend that a mock response came from Gemini or live systems.
   if (!client) {
     return mockReply(text, intent, trustedContext);
@@ -150,6 +157,7 @@ function mockReply(text: string, intent: AssistantIntent, context: string): Assi
   if (intent === 'DONATION' && /VERIFIED CUSTOMER DONATION/.test(context)) {
     const match = context.match(/Reference: (DON-[A-Z0-9-]+)\nAmount: ([^\n]+)\nPayment status: ([A-Z_]+)/);
     if (match) return { text: `Donation ${match[1]}: ${match[2]}. Payment status: ${match[3]}.`, intent };
+    return { text: 'Is WhatsApp number se is reference ka donation record verify nahi hua. Reference check karein ya Trust team se 6913001300 par contact karein.', intent };
   }
   if (intent === 'TRACK' && /VERIFIED CUSTOMER ORDER/.test(context)) {
     const match = context.match(/Order: (ORD-[A-Z0-9-]+)\nOrder status: ([A-Z_]+)\nPayment status: ([A-Z_]+)/);
@@ -157,7 +165,8 @@ function mockReply(text: string, intent: AssistantIntent, context: string): Assi
     return { text: 'I could not find that order for this WhatsApp number. Please check the order number or contact the Trust at 6913001300.', intent };
   }
   if (intent === 'DONATION' && amount) {
-    return { text: `Aap ₹${amount} donate karna chahte hain. Donation complete hone ka confirmation payment record se hi milega. Donation ke liye https://amritvela-4zl7p1sf1-suryapratapsingh2027-collabs-projects.vercel.app/donate par jaayein.`, intent };
+    const donationUrl = `${env.WEB_URL.replace(/\/$/, '')}/donate`;
+    return { text: `Aap ₹${amount} donate karna chahte hain. Donation complete hone ka confirmation payment record se hi milega. Donation ke liye ${donationUrl} par jaayein.`, intent };
   }
   if (intent === 'SHOP') {
     const products = context.match(/LIVE PRODUCTS[\s\S]*/)?.[0];
