@@ -37,3 +37,11 @@
 - Added Razorpay webhook event and Payment Link reconciliation diagnostics so Render logs reveal which event was delivered and whether the link/donation matched.
 - Fixed the `req.params.id` TypeScript issue in `src/routes/assistant.ts` by converting it to a string.
 - These source changes do not prove the production webhook configuration is correct. The Razorpay dashboard must have the deployed `/api/webhooks/razorpay` URL (confirm actual mount path) and the `payment_link.paid` event enabled; after deploy, check logs for `[RAZORPAY WEBHOOK] Received event: payment_link.paid`. Existing paid transactions still need a verified reconciliation path if their webhook event was missed.
+
+
+## Follow-up fix: WhatsApp donation/receipt intent priority
+
+- Root cause: `handleWhatsAppShop()` was called before donation intent handling. It resumes a previous product checkout based on the latest outbound prompt, so messages such as "Kar diya donation meri receipt?" were incorrectly answered with the product list.
+- Change: explicit donation/receipt intent handling now runs before the shop state machine. "Donation karna hai" without an amount asks for the amount without depending on Gemini. A receipt request looks up the latest donation for the sender's phone and only sends the PDF when its database status is `PAID`; otherwise it clearly says reconciliation is needed and warns not to pay again.
+- This does not falsely mark a Razorpay payment as paid. A payment still requires a valid signed webhook or a separate authenticated Razorpay verification/reconciliation path.
+- Verification limitation: full `tsc` build must be run in the project environment after installing dependencies. No live Razorpay or WhatsApp credentials were available here, so delivery cannot be claimed as end-to-end tested.

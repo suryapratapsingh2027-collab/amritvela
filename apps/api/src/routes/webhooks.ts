@@ -191,8 +191,63 @@ console.log('[WHATSAPP DEBUG] Business phone number ID:', value?.metadata?.phone
       return res.sendStatus(200);
     }
 
-    // Deterministic product checkout runs before the general AI response. It uses
-    // saved conversation messages so a multi-message WhatsApp checkout survives restarts.
+    // Handle donation and receipt intents BEFORE the shop state machine.
+    // A stale product checkout prompt must never swallow donation/receipt messages.
+    const normalizedText = String(text || '').trim();
+    const receiptIntent = /\b(receipt|rasid|रसीद|pdf|donation\s*(?:ki|ka|ke)?\s*receipt|meri\s*receipt|receipt\s*(?:bhejo|do|send)|payment\s*(?:kar|done|ho\s*gaya))\b/i.test(normalizedText);
+    const donationIntentPattern = /\b(donat(?:e|ion|ing)?|daan|chanda|contribut(?:e|ion)?|fund|yogdaan|योगदान|दान)\b/i;
+    const isDonationIntent = donationIntentPattern.test(normalizedText);
+
+    if (receiptIntent) {
+      const latestDonation = await db.donation.findFirst({
+        where: { user: { phone } },
+        orderBy: { createdAt: 'desc' },
+        include: { user: true },
+      });
+
+      if (!latestDonation) {
+        const reply = 'Mujhe is number se judi donation entry nahi mili. Kripya donation ka reference number bhejein ya Trust team se 6913001300 par sampark karein.';
+        await sendWhatsAppText(phone, reply);
+        await db.message.create({ data: { conversationId: conversation.id, direction: 'OUT', text: reply, metadata: { intent: 'DONATION_RECEIPT', whatsappMessageId } } });
+      } else if (latestDonation.paymentStatus === 'PAID') {
+        const receiptUrl = `${env.API_URL}/api/donations/${latestDonation.id}/receipt`;
+        await db.donation.update({ where: { id: latestDonation.id }, data: { receiptUrl } });
+        const reply = `Aapki ₹${latestDonation.amount} donation (${latestDonation.reference}) verified hai. PDF receipt bhej raha hoon.`;
+        await sendWhatsAppText(phone, reply);
+        await sendWhatsAppDocument(phone, receiptUrl, `${latestDonation.reference}.pdf`);
+        await db.message.create({ data: { conversationId: conversation.id, direction: 'OUT', text: reply, metadata: { intent: 'DONATION_RECEIPT', donationReference: latestDonation.reference, whatsappMessageId } } });
+      } else {
+        const reply = `Aapki latest donation ${latestDonation.reference} abhi database mein ${latestDonation.paymentStatus} hai, isliye receipt issue nahi kar sakta. Razorpay payment ko verify/reconcile karna hoga. Dobara payment na karein; Trust team se 6913001300 par sampark karein.`;
+        await sendWhatsAppText(phone, reply);
+        await db.message.create({ data: { conversationId: conversation.id, direction: 'OUT', text: reply, metadata: { intent: 'DONATION_RECEIPT_STATUS', donationReference: latestDonation.reference, whatsappMessageId } } });
+      }
+      await db.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+      return res.sendStatus(200);
+    }
+
+    // If user asks to donate without an amount, ask for the amount deterministically;
+    // do not route the message through stale shop checkout or an unavailable AI provider.
+    if (isDonationIntent) {
+      const amountMatchNow = normalizedText.match(/(?:₹\s*|\b(?:rs\.?|inr)\s*)?(\d{1,7}(?:,\d{3})*(?:\.\d{1,2})?)(?:\s*(?:rs\.?|rupees?|rupaye|रुपये|रुपए|inr))?/i);
+      if (!amountMatchNow) {
+        const reply = 'Amrit Vela Trust ko donation dene ke liye kitni rakam donate karna chahte hain? Kripya amount bhejein, jaise ₹500.';
+        await sendWhatsAppText(phone, reply);
+        await db.message.create({ data: { conversationId: conversation.id, direction: 'OUT', text: reply, metadata: { intent: 'DONATION_AMOUNT', whatsappMessageId } } });
+        await db.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        return res.sendStatus(200);
+      }
+      const amount = Number(amountMatchNow[1].replace(/,/g, ''));
+      if (Number.isFinite(amount) && amount >= 1 && amount <= 10000000) {
+        const donor = await db.user.findUnique({ where: { phone } });
+        const result = await createAndSendDonationLink({ phone, name: donor?.name, email: donor?.email, amount });
+        await db.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+        await db.message.create({ data: { conversationId: conversation.id, direction: 'OUT', text: result.message, metadata: { intent: 'DONATION', whatsappMessageId, donationReference: result.reference, paymentLinkId: result.paymentLinkId } } });
+        return res.sendStatus(200);
+      }
+    }
+
+    // Deterministic product checkout runs only after higher-priority donation/receipt intents.
+    // It uses saved conversation messages so a multi-message checkout survives restarts.
     const shopReply = await handleWhatsAppShop(phone, text, conversation.id);
     if (shopReply) {
       await sendWhatsAppText(phone, shopReply);
@@ -201,52 +256,6 @@ console.log('[WHATSAPP DEBUG] Business phone number ID:', value?.metadata?.phone
       });
       await db.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
       return res.sendStatus(200);
-    }
-
-    // Donation requests can span multiple WhatsApp messages. Example:
-    // "Mujhe donation bhi karna hai" followed by "General fund 500 rupay ka".
-    const recentIncoming = await db.message.findMany({
-      where: { conversationId: conversation.id, direction: 'IN' },
-      orderBy: { createdAt: 'desc' },
-      take: 8,
-      select: { text: true },
-    });
-    const donationIntentPattern = /\b(donat(?:e|ion|ing)?|daan|chanda|contribut(?:e|ion)?|fund|yogdaan|योगदान|दान)\b/i;
-    const hasDonationContext = recentIncoming.some((item) =>
-      donationIntentPattern.test(String(item.text || ''))
-    );
-    const amountMatch = text.match(/(?:₹\s*|\b(?:rs\.?|inr)\s*)?(\d{1,7}(?:,\d{3})*(?:\.\d{1,2})?)(?:\s*(?:rs\.?|rupees?|rupaye|रुपये|रुपए|inr))?/i);
-
-    if (hasDonationContext && amountMatch) {
-      const amount = Number(amountMatch[1].replace(/,/g, ''));
-      if (Number.isFinite(amount) && amount >= 1 && amount <= 10000000) {
-        const donor = await db.user.findUnique({ where: { phone } });
-        const result = await createAndSendDonationLink({
-          phone,
-          name: donor?.name,
-          email: donor?.email,
-          amount,
-        });
-        await db.conversation.update({
-          where: { id: conversation.id },
-          data: { lastMessageAt: new Date() },
-        });
-        await db.message.create({
-          data: {
-            conversationId: conversation.id,
-            direction: 'OUT',
-            text: result.message,
-            metadata: {
-              intent: 'DONATION',
-              whatsappMessageId,
-              donationReference: result.reference,
-              paymentLinkId: result.paymentLinkId,
-            },
-          },
-        });
-        console.log('[WHATSAPP DONATION] Payment link created:', result.reference);
-        return res.sendStatus(200);
-      }
     }
 
     // Generate AI response.
