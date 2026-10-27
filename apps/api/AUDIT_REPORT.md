@@ -58,3 +58,6 @@ New env vars (all optional): `SHIPROCKET_PICKUP_LOCATION` (exact pickup nickname
 Shiprocket checklist: create an API user (Settings → API) and use *its* email/password in `SHIPROCKET_EMAIL/PASSWORD`; add a pickup address; keep wallet balance; the customer's PIN must be serviceable.
 Photos: only public `https://` images work (Cloudinary uploads from the admin panel do). Photos must be under 5 MB.
 Tests: 35 + 22 unit, 55 end-to-end checks pass. Not verified live: Shiprocket's real API (payload validated against Shiprocket's documented required fields with a mock).
+
+## Hotfix: "No pickup address found in Shiprocket"
+Shiprocket returned no pickup address for the API login. Pickup parsing now handles every known response shape and prefers a verified address; if it is still empty the error shows Shiprocket's raw response. Fastest fix: set `SHIPROCKET_PICKUP_LOCATION` to the exact "Pickup Location" name from Shiprocket > Settings > Pickup Addresses.

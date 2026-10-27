@@ -42,4 +42,13 @@ t('image urls', () => {
   assert.equal(toWhatsAppImageUrl('https://res.cloudinary.com/demo/image/upload/v1/amrit-vela-trust/x.png'), 'https://res.cloudinary.com/demo/image/upload/f_jpg,q_auto,w_1000/v1/amrit-vela-trust/x.png');
   assert.equal(toWhatsAppImageUrl('https://example.com/a.jpg'), 'https://example.com/a.jpg');
 });
+const { extractPickupLocation } = require('../src/integrations/shiprocket');
+t('pickup location: documented shape, variants, verified preferred, none', () => {
+  assert.equal(extractPickupLocation({ data: { shipping_address: [{ pickup_location: 'Home' }] } }), 'Home');
+  assert.equal(extractPickupLocation({ data: { shipping_address: [{ pickup_location: 'A', phone_verified: 0 }, { pickup_location: 'B', phone_verified: 1 }] } }), 'B');
+  assert.equal(extractPickupLocation({ shipping_address: [{ pickup_location: ' Primary ' }] }), 'Primary');
+  assert.equal(extractPickupLocation({ data: [{ pickup_location: 'X' }] }), 'X');
+  assert.equal(extractPickupLocation({ data: { shipping_address: [] } }), null);
+  assert.equal(extractPickupLocation(null), null);
+});
 console.log(`\n${n} knowledge/shipping tests passed`);

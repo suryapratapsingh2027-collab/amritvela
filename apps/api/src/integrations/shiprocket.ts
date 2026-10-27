@@ -46,14 +46,31 @@ async function call<T = any>(method: 'get' | 'post', path: string, data?: unknow
   }
 }
 
-/** The pickup location nickname must match Shiprocket exactly, otherwise order creation fails with 422/400. */
+/**
+ * Picks the pickup-location nickname out of Shiprocket's pickup-address response.
+ * Handles the documented shape ({data:{shipping_address:[...]}}) and the variants seen in the wild,
+ * preferring a verified address. Exported for unit tests.
+ */
+export function extractPickupLocation(res: any): string | null {
+  const candidates = [res?.data?.shipping_address, res?.shipping_address, res?.data?.pickup_addresses, res?.data?.data?.shipping_address, res?.data, res];
+  const list: any[] = (candidates.find((c) => Array.isArray(c) && c.length) as any[]) || [];
+  const named = list.filter((x) => x && typeof (x.pickup_location ?? x.nickname) === 'string' && String(x.pickup_location ?? x.nickname).trim());
+  if (!named.length) return null;
+  const verified = named.find((x) => x.phone_verified === 1 || x.phone_verified === true || x.status === 2);
+  const pick = verified || named[0];
+  return String(pick.pickup_location ?? pick.nickname).trim();
+}
+
+/** The pickup location nickname must match Shiprocket exactly, otherwise order creation fails. */
 export async function getPickupLocation(): Promise<string> {
-  if (env.SHIPROCKET_PICKUP_LOCATION) return env.SHIPROCKET_PICKUP_LOCATION;
+  if (env.SHIPROCKET_PICKUP_LOCATION?.trim()) return env.SHIPROCKET_PICKUP_LOCATION.trim();
   if (env.MOCK_PROVIDERS) return 'Primary';
   const res: any = await call('get', '/settings/company/pickup');
-  const first = res?.data?.shipping_address?.[0]?.pickup_location;
-  if (!first) throw new Error('No pickup address found in Shiprocket. Add one in Shiprocket > Settings > Pickup Addresses (or set SHIPROCKET_PICKUP_LOCATION).');
-  return String(first);
+  const found = extractPickupLocation(res);
+  if (found) return found;
+  const summary = JSON.stringify(res)?.slice(0, 300);
+  console.error('[SHIPROCKET] No pickup address in response:', summary);
+  throw new Error(`Shiprocket ne is API login ke liye koi pickup address nahi diya (response: ${summary}). Shiprocket panel > Settings > Pickup Addresses me address ka "Pickup Location" naam dekhein aur use Render me SHIPROCKET_PICKUP_LOCATION ke roop me set karein. Dhyan dein: API user ka account wahi hona chahiye jisme pickup address bana hai.`);
 }
 
 export async function createShipment(payload: any) {
