@@ -120,7 +120,9 @@ export function parseExplicitQuantity(text: string): number | null {
 
 const BUY = /(?:^|[^a-z])(kharid\w*|khareed\w*|order|buy|purchase|chahiye|chahie|chaiye|chahiyen|lena|leni|lene|mangwa\w*|mangna|le\s*lo|dedo|de\s*do|book)(?:$|[^a-z])|खरीद|ऑर्डर|चाहिए|लेना|मंगवा/i;
 const PRICE = /(?:^|[^a-z])(price|rate|kitne|kitna|kitni|kimat|keemat|cost|daam|dam|bhaav|bhav)(?:$|[^a-z])|कीमत|दाम|भाव|कितने|कितना/i;
-const CATALOG = /(?:^|[^a-z])(products?|catalog|catalogue|list|saman|samaan|items?|shop|store|dukan|kya\s*kya|what\s*do\s*you\s*sell)(?:$|[^a-z])|प्रोडक्ट|सामान|दुकान/i;
+const CATALOG = /(?:^|[^a-z])(products?|catalog|catalogue|saman|samaan|shop|store|dukan|price\s*list|rate\s*list|what\s*do\s*you\s*sell)(?:$|[^a-z])|प्रोडक्ट|सामान|दुकान/i;
+const PHOTO = /(?:^|[^a-z])(photo|photos|image|images|pic|pics|picture|pictures|tasveer|tasvir|dikhao|dikha|dikhana|dekhna|dekhni|dikhaiye)(?:$|[^a-z])|फोटो|तस्वीर|दिखाओ|दिखा/i;
+export function hasPhotoIntent(text: string): boolean { return PHOTO.test(text); }
 export function hasBuyIntent(text: string): boolean { return BUY.test(text); }
 export function hasPriceIntent(text: string): boolean { return PRICE.test(text); }
 export function hasCatalogIntent(text: string): boolean { return CATALOG.test(text); }
@@ -173,7 +175,7 @@ export function isPaymentClaim(text: string): boolean {
 export function extractDonationRef(text: string): string | null { return text.match(/\bDON-\d+-\d+\b/i)?.[0]?.toUpperCase() ?? null; }
 export function extractOrderRef(text: string): string | null { return text.match(/\bORD-\d+-\d+\b/i)?.[0]?.toUpperCase() ?? null; }
 
-const TRACK_WORDS = /(?:^|[^a-z])(track\w*|status|shipment|awb|parcel|kahan\s*hai|kab\s*aayega|delivery\s*status)(?:$|[^a-z])|ट्रैक|स्टेटस/i;
+const TRACK_WORDS = /(?:^|[^a-z])(track\w*|status|shipment|awb|parcel|delivery\s*status|(?:order|parcel|package|saman|samaan)\s+(?:kahan|kaha|kab)|kab\s*aayega|kab\s*tak\s*aayega)(?:$|[^a-z])|ट्रैक|स्टेटस/i;
 export function hasTrackIntent(text: string): boolean { return TRACK_WORDS.test(text); }
 
 const HUMAN = /(?:^|[^a-z])(human|agent|representative|customer\s*care|insaan|manushya|operator)(?:$|[^a-z])|kisi\s*se\s*baat|baat\s*karni|support\s*team|talk\s*to\s*(?:someone|a\s*person)|इंसान|किसी\s*से\s*बात|सपोर्ट/i;

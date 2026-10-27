@@ -48,6 +48,11 @@ const schema = z
     // Shiprocket
     SHIPROCKET_EMAIL: z.string().optional(),
     SHIPROCKET_PASSWORD: z.string().optional(),
+    // Must match the pickup location "nickname" in Shiprocket > Settings > Pickup Addresses. If empty, the first pickup address of the account is used.
+    SHIPROCKET_PICKUP_LOCATION: z.string().optional(),
+    // Shiprocket requires a customer email; used when the customer has none.
+    SHIPROCKET_FALLBACK_EMAIL: z.string().default('amritvelatrustlive@gmail.com'),
+    SHIPROCKET_DEFAULT_WEIGHT_KG: z.coerce.number().positive().default(0.5),
     // Optional shared secret: if set, Shiprocket webhooks must send it in the x-api-key header.
     SHIPROCKET_WEBHOOK_TOKEN: z.string().optional(),
     SHIPROCKET_BASE_URL: z

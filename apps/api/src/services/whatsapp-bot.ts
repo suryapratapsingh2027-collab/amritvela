@@ -12,7 +12,7 @@
 import { Prisma } from '@prisma/client';
 import { db } from '../db';
 import { env } from '../config';
-import { sendWhatsAppText } from '../integrations/whatsapp';
+import { sendWhatsAppText, toWhatsAppImageUrl } from '../integrations/whatsapp';
 import { createOrderPaymentLink } from '../integrations/razorpay';
 import { createDonationLink } from './donation-payment-link';
 import { reconcileDonation, reconcileOrder, sendReceiptPdf } from './payments';
@@ -20,14 +20,14 @@ import { sendOrderInvoice } from './fulfillment';
 import { isSellable, money, shippingFor } from './pricing';
 import {
   MAX_DONATION, extractDonationRef, extractOrderRef, extractPin, findProducts, hasBuyIntent, hasCatalogIntent,
-  hasDonationIntent, hasHumanIntent, hasPriceIntent, hasTrackIntent, isCancelOrMenu, isGreeting, isNo,
+  hasDonationIntent, hasHumanIntent, hasPhotoIntent, hasPriceIntent, hasTrackIntent, isCancelOrMenu, isGreeting, isNo,
   isPaymentClaim, isReceiptRequest, isYes, parseAmount, parseExplicitQuantity, parseQuantity, validateAddress, validateName,
 } from './bot-nlp';
 
 const SUPPORT = 'Agar dikkat aaye to Trust team se 6913001300 par sampark karein.';
 const STATE_TTL_MS = 30 * 60 * 1000;
 
-export type BotReply = { text: string; intent: string; after?: () => Promise<void> };
+export type BotReply = { text: string; intent: string; image?: { url: string; caption: string }; after?: () => Promise<void> };
 type Ctx = { phone: string; text: string; conversationId: string };
 
 type State =
@@ -38,7 +38,12 @@ type State =
   | { step: 'AWAIT_DONATION_AMOUNT'; at: number }
   | { step: 'AWAIT_DONATION_NAME'; at: number; amount: number };
 
-type ProductRow = { id: string; name: string; slug: string; price: number; stock: number; active: boolean; currency: string };
+type ProductRow = { id: string; name: string; slug: string; price: number; stock: number; active: boolean; currency: string; imageUrl: string | null };
+
+function productImage(p: ProductRow): BotReply['image'] {
+  const url = toWhatsAppImageUrl(p.imageUrl);
+  return url ? { url, caption: `${p.name} — ${money(p.price)}` } : undefined;
+}
 
 /* ------------------------------------------------------------------ state helpers */
 
@@ -56,7 +61,7 @@ async function writeState(conversationId: string, state: State | null) {
 async function loadProducts(): Promise<ProductRow[]> {
   const rows = await db.product.findMany({
     where: { active: true }, orderBy: { name: 'asc' }, take: 100,
-    select: { id: true, name: true, slug: true, price: true, stock: true, active: true, currency: true },
+    select: { id: true, name: true, slug: true, price: true, stock: true, active: true, currency: true, imageUrl: true },
   });
   return rows.filter(isSellable);
 }
@@ -69,7 +74,7 @@ function productList(products: ProductRow[]): string {
   if (!products.length) return `Abhi koi product order ke liye available nahi hai. ${SUPPORT}`;
   return 'Aap kaunsa product order karna chahte hain?\n' +
     products.map((p) => `• ${p.name} — ${money(p.price)} — ${p.stock > 0 ? `${p.stock} available` : 'Out of stock'}`).join('\n') +
-    '\n\nProduct ka naam bhejein, jaise "' + (products.find((p) => p.stock > 0)?.name || products[0].name) + '". Cancel karne ke liye "cancel" likhein.';
+    '\n\nProduct ka naam bhejein, jaise "' + (products.find((p) => p.stock > 0)?.name || products[0].name) + '". Kisi product ki photo ke liye "' + products[0].name + ' photo" likhein. Cancel karne ke liye "cancel" likhein.';
 }
 
 const ORDER_STATUS_TEXT: Record<string, string> = {
@@ -270,9 +275,18 @@ async function handleShop(ctx: Ctx, text: string): Promise<BotReply | null> {
   }
   if (wanted.length === 1) {
     const p = wanted[0];
+    if (hasPhotoIntent(text) && !hasBuyIntent(text)) {
+      const image = productImage(p);
+      return {
+        intent: 'SHOP', image,
+        text: image
+          ? `${p.name} — ${money(p.price)} (${p.stock > 0 ? `${p.stock} available` : 'Out of stock'}). Order karne ke liye "${p.name} kharidna hai" likhein.`
+          : `${p.name} ki photo abhi available nahi hai. Price: ${money(p.price)} (${p.stock > 0 ? `${p.stock} available` : 'Out of stock'}). Order karne ke liye "${p.name} kharidna hai" likhein.`,
+      };
+    }
     if (hasBuyIntent(text)) return startCheckout(ctx, p, parseQuantity(text, spans.get(p.id)));
     if (hasPriceIntent(text)) {
-      return { intent: 'SHOP', text: `${p.name} — ${money(p.price)} (${p.stock > 0 ? `${p.stock} available` : 'Out of stock'}). Order karne ke liye "${p.name} kharidna hai" likhein.` };
+      return { intent: 'SHOP', image: productImage(p), text: `${p.name} — ${money(p.price)} (${p.stock > 0 ? `${p.stock} available` : 'Out of stock'}). Order karne ke liye "${p.name} kharidna hai" likhein.` };
     }
     // Just the product name on its own means "I want this".
     if (normalizeBare(text) === normalizeBare(p.name)) return startCheckout(ctx, p, 1);
@@ -301,13 +315,13 @@ async function startCheckout(ctx: Ctx, p: ProductRow, quantity: number, keep?: {
   const user = await db.user.findUnique({ where: { phone: ctx.phone } });
   if (!user?.name) {
     await writeState(ctx.conversationId, { step: 'AWAIT_NAME', at: Date.now(), productId: p.id, quantity, ...(keep || {}) });
-    return { intent: 'SHOP', text: `Aapne ${p.name} x ${quantity} choose kiya hai (${money(p.price)} each). Delivery ke liye apna poora naam bhejein.` };
+    return { intent: 'SHOP', image: productImage(p), text: `Aapne ${p.name} x ${quantity} choose kiya hai (${money(p.price)} each). Delivery ke liye apna poora naam bhejein.` };
   }
   if (keep) return confirmationReply(ctx, p, quantity, user.name, keep.address, keep.pin);
   await writeState(ctx.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: p.id, quantity });
   const subtotal = p.price * quantity;
   const fee = shippingFor(subtotal);
-  return { intent: 'SHOP', text: `${p.name} x ${quantity} — ${money(subtotal)}.\nDelivery ke liye apna poora address, area/city, state aur 6-digit PIN code ek message mein bhejein.\nDelivery charge: ${fee === 0 ? 'free' : money(fee)}.` };
+  return { intent: 'SHOP', image: productImage(p), text: `${p.name} x ${quantity} — ${money(subtotal)}.\nDelivery ke liye apna poora address, area/city, state aur 6-digit PIN code ek message mein bhejein.\nDelivery charge: ${fee === 0 ? 'free' : money(fee)}.` };
 }
 
 async function confirmationReply(ctx: Ctx, p: ProductRow, quantity: number, name: string, address: string, pin: string): Promise<BotReply> {

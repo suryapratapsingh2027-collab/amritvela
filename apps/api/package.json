@@ -12,7 +12,7 @@
     "prisma:deploy": "prisma migrate deploy",
     "prisma:seed-knowledge": "tsx prisma/seed-knowledge.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx test/nlp.test.ts"
+    "test": "tsx test/nlp.test.ts && tsx test/knowledge.test.ts"
   },
   "dependencies": {
     "@google/genai": "^2.29.0",

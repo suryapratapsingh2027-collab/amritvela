@@ -2,6 +2,7 @@ import { GoogleGenAI } from '@google/genai';
 import { db } from '../db';
 import { env } from '../config';
 import { isSellable, money } from './pricing';
+import { searchKnowledge } from './knowledge-search';
 
 const client = env.GEMINI_API_KEY
   ? new GoogleGenAI({ apiKey: env.GEMINI_API_KEY })
@@ -32,6 +33,10 @@ export async function answer(
 
   // Never pretend that a mock response came from Gemini or live systems.
   if (!client) {
+    if (intent === 'GENERAL') {
+      const found = searchKnowledge(text, context);
+      if (found) return { text: `${found}\n\nAur jaankari ke liye Trust team se 6913001300 par sampark karein.`, intent };
+    }
     return mockReply(text, intent, trustedContext);
   }
 
@@ -61,6 +66,8 @@ ${trustedContext || 'No verified Trust knowledge has been added yet.'}`;
 
     const responseText = response.text?.trim();
     if (!responseText) {
+      const found = intent === 'GENERAL' ? searchKnowledge(text, context) : null;
+      if (found) return { text: `${found}\n\nAur jaankari ke liye Trust team se 6913001300 par sampark karein.`, intent };
       return {
         text: 'I could not prepare a reliable answer right now. Please contact the Trust at 6913001300 or amritvelatrustlive@gmail.com.',
         intent,
@@ -71,6 +78,8 @@ ${trustedContext || 'No verified Trust knowledge has been added yet.'}`;
   } catch (error) {
     // A provider outage should not crash webhook processing or fabricate a result.
     console.error('[AI] Gemini request failed:', error instanceof Error ? error.message : error);
+    const found = intent === 'GENERAL' ? searchKnowledge(text, context) : null;
+    if (found) return { text: `${found}\n\nAur jaankari ke liye Trust team se 6913001300 par sampark karein.`, intent };
     return {
       text: 'I am unable to verify that information right now. Please contact the Trust at 6913001300 or amritvelatrustlive@gmail.com.',
       intent,

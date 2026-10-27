@@ -1,7 +1,7 @@
 
 import { Prisma } from '@prisma/client';
 import { db } from '../db';
-import { createShipment } from '../integrations/shiprocket';
+import { assignAwb, createShipment, getPickupLocation } from '../integrations/shiprocket';
 import { createWooOrder } from '../integrations/woocommerce';
 import {
   sendWhatsAppText,
@@ -9,6 +9,7 @@ import {
   sendWhatsAppPdf,
 } from '../integrations/whatsapp';
 import { makeInvoice } from './receipt';
+import { addressText, extractPin, guessStateCity, indianMobile, lookupPin, splitName } from './shipping-address';
 import { env } from '../config';
 
 /**
@@ -85,67 +86,84 @@ export async function sendOrderInvoice(orderId: string) {
 export async function shipOrder(orderId: string) {
   const order = await db.order.findUnique({
     where: { id: orderId },
-    include: {
-      user: true,
-      items: { include: { product: true } },
-    },
+    include: { user: true, items: { include: { product: true } } },
   });
+  if (!order) throw new Error('Order not found');
+  if (order.paymentStatus !== 'PAID') throw new Error('Order must be paid before shipping');
+  if (order.awb) return order; // already shipped; never create a duplicate Shiprocket order
 
-  if (!order) {
-    throw new Error('Order not found');
+  let shiprocketOrderId = order.shiprocketOrderId;
+  let shipmentId = order.shiprocketShipmentId;
+  let awb = '';
+  let courier = '';
+
+  if (!shipmentId) {
+    const full = addressText(order.address);
+    const pin = (order.address as any)?.pin && /^\d{6}$/.test(String((order.address as any).pin)) ? String((order.address as any).pin) : extractPin(full);
+    if (!full || full.length < 8) throw new Error('Order address is missing or too short. Edit the order address before shipping.');
+    if (!pin) throw new Error('Order address has no valid 6-digit PIN code, which Shiprocket requires.');
+
+    const looked = await lookupPin(pin);
+    const guess = guessStateCity(full);
+    const city = looked?.city || guess.city;
+    const state = looked?.state || guess.state;
+    if (!city || !state) throw new Error(`Could not work out city/state for PIN ${pin}. Add the city and state to the order address and try again.`);
+
+    const phone = indianMobile(order.user.phone);
+    if (phone.length !== 10) throw new Error(`Customer phone "${order.user.phone}" is not a valid 10-digit Indian mobile number.`);
+
+    const { first, last } = splitName(order.user.name);
+    const istDate = new Date(order.createdAt.getTime() + 5.5 * 60 * 60 * 1000).toISOString().slice(0, 16).replace('T', ' ');
+    const weight = Math.max(0.1, env.SHIPROCKET_DEFAULT_WEIGHT_KG * Math.max(1, order.items.reduce((n, i) => n + i.quantity, 0)));
+
+    const created: any = await createShipment({
+      order_id: order.orderNumber,
+      order_date: istDate,
+      pickup_location: await getPickupLocation(),
+      billing_customer_name: first,
+      billing_last_name: last,
+      billing_address: full.slice(0, 190),
+      billing_city: city,
+      billing_pincode: pin,
+      billing_state: state,
+      billing_country: 'India',
+      billing_email: order.user.email || env.SHIPROCKET_FALLBACK_EMAIL,
+      billing_phone: phone,
+      shipping_is_billing: true,
+      order_items: order.items.map((i) => ({ name: i.product.name, sku: i.product.slug, units: i.quantity, selling_price: i.unitPrice })),
+      payment_method: 'Prepaid',
+      shipping_charges: order.shippingFee,
+      sub_total: order.subtotal,
+      length: 10, breadth: 10, height: 10, weight,
+    });
+
+    shiprocketOrderId = created?.order_id != null ? String(created.order_id) : null;
+    shipmentId = created?.shipment_id != null ? String(created.shipment_id) : null;
+    if (!shiprocketOrderId || !shipmentId) throw new Error(`Shiprocket did not return an order/shipment id: ${JSON.stringify(created).slice(0, 300)}`);
+    awb = created?.awb_code ? String(created.awb_code) : '';
+    courier = created?.courier_name ? String(created.courier_name) : '';
+    await db.order.update({ where: { id: order.id }, data: { shiprocketOrderId, shiprocketShipmentId: shipmentId, status: 'PROCESSING' } });
   }
 
-  if (order.paymentStatus !== 'PAID') {
-    throw new Error('Order must be paid before shipping');
+  if (!awb) {
+    try {
+      const assigned = await assignAwb(shipmentId);
+      awb = assigned.awb; courier = assigned.courier;
+    } catch (e: any) {
+      // The Shiprocket order exists now; pressing "Create shipment" again only retries the courier step.
+      throw new Error(`Shiprocket order ${shiprocketOrderId} ban gaya, lekin courier/AWB assign nahi hua: ${e.message}. Shiprocket wallet balance aur pincode serviceability check karke dobara "Create shipment" dabayein.`);
+    }
   }
-
-  const shipment = await createShipment({
-    order_id: order.orderNumber,
-    order_date: order.createdAt,
-    channel_id: '',
-    billing_customer_name: order.user.name || 'Customer',
-    billing_address: order.address,
-    shipping_is_billing: true,
-    order_items: order.items.map(
-      (i: {
-        product: { name: string };
-        quantity: number;
-        unitPrice: number;
-      }) => ({
-        name: i.product.name,
-        selling_price: i.unitPrice,
-        units: i.quantity,
-        sac: '',
-        discount: '',
-        tax: '',
-        hsn: '',
-      })
-    ),
-    sub_total: order.subtotal,
-    length: 10,
-    breadth: 10,
-    height: 10,
-    weight: 0.5,
-    pickup_location: 'Primary',
-  });
-
-  const awb = (shipment as any).awb_code || '';
 
   const updated = await db.order.update({
     where: { id: order.id },
-    data: {
-      status: 'SHIPPED',
-      shiprocketOrderId: String((shipment as any).order_id || ''),
-      awb: String(awb),
-      courier: String((shipment as any).courier_name || ''),
-      trackingUrl: awb ? `https://shiprocket.co/tracking/${awb}` : null,
-    },
+    data: { status: 'SHIPPED', awb, courier: courier || null, trackingUrl: `https://shiprocket.co/tracking/${awb}` },
   });
 
   await sendWhatsAppText(
     order.user.phone,
-    `Your order ${order.orderNumber} has shipped.${awb ? ` AWB: ${awb}` : ''}`
-  ).catch(() => undefined);
+    `Aapka order ${order.orderNumber} ship ho gaya hai.${courier ? `\nCourier: ${courier}` : ''}\nAWB: ${awb}\nTracking: https://shiprocket.co/tracking/${awb}`,
+  ).catch((e) => console.error('[SHIP] WhatsApp notice failed:', e?.message || e));
 
   return updated;
 }

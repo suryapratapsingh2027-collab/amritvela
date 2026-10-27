@@ -104,6 +104,7 @@ model Order {
   razorpayPaymentId String?
   wooOrderId String?
   shiprocketOrderId String?
+  shiprocketShipmentId String?
   awb String?
   courier String?
   trackingUrl String?

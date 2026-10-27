@@ -177,3 +177,37 @@ export async function sendWhatsAppPdf(to: string, pdf: Buffer, filename: string,
     throw error;
   }
 }
+
+/** Normalises an admin-uploaded image URL into something WhatsApp can fetch (public https, JPEG/PNG, < 5 MB). */
+export function toWhatsAppImageUrl(raw?: string | null): string | null {
+  let url = String(raw || '').trim();
+  if (!url) return null;
+  if (url.startsWith('/')) url = `${env.WEB_URL.replace(/\/$/, '')}${url}`;
+  if (!/^https:\/\//i.test(url)) return null;
+  // Cloudinary may serve WebP/AVIF/huge originals, which WhatsApp rejects. Force a 1000px JPEG.
+  if (/res\.cloudinary\.com/.test(url) && url.includes('/image/upload/') && !/\/image\/upload\/[^/]*(?:f_|w_)/.test(url)) {
+    url = url.replace('/image/upload/', '/image/upload/f_jpg,q_auto,w_1000/');
+  }
+  return url;
+}
+
+export async function sendWhatsAppImage(to: string, imageUrl: string, caption?: string): Promise<any> {
+  if (isMockMode()) {
+    console.warn('[WhatsApp] Mock mode enabled or credentials missing; image not sent.');
+    return { mock: true, to, imageUrl };
+  }
+  try {
+    const response = await axios.post(
+      getWhatsAppMessagesUrl(),
+      {
+        messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'image',
+        image: { link: imageUrl, ...(caption ? { caption: caption.slice(0, 1000) } : {}) },
+      },
+      { headers: { Authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 20000 },
+    );
+    return response.data;
+  } catch (error: unknown) {
+    logWhatsAppError('image', error);
+    throw error;
+  }
+}

@@ -4,7 +4,7 @@ import { Prisma } from '@prisma/client';
 import { db } from '../db';
 import { env } from '../config';
 import { verifySignature } from '../integrations/razorpay';
-import { sendWhatsAppText } from '../integrations/whatsapp';
+import { sendWhatsAppImage, sendWhatsAppText } from '../integrations/whatsapp';
 import { markOrderPaid } from '../services/fulfillment';
 import { answer, knowledge } from '../services/ai';
 import { routeWhatsAppMessage, type BotReply } from '../services/whatsapp-bot';
@@ -96,8 +96,13 @@ async function processIncoming(phone: string, text: string, whatsappMessageId: s
 
   if (reply.intent === 'HUMAN') await openSupportTicket(conversation.id, 'Customer requested human support');
 
+  // Product photo first (best effort: a bad image URL must never block the actual answer).
+  if (reply.image) {
+    try { await sendWhatsAppImage(phone, reply.image.url, reply.image.caption); }
+    catch (e: any) { console.error('[WHATSAPP] Product image failed, continuing with text:', e?.message || e); }
+  }
   await sendWhatsAppText(phone, reply.text);
-  await saveOut(conversation.id, reply.text, reply.intent, whatsappMessageId);
+  await saveOut(conversation.id, reply.text, reply.intent, whatsappMessageId, reply.image ? { image: reply.image.url } : {});
 
   if (reply.after) {
     try { await reply.after(); } catch (e: any) { console.error('[WHATSAPP] follow-up action failed:', e?.message || e); }

@@ -42,3 +42,19 @@
 - Public `/api/assistant` accepts any `phone` in the body (lookups still need an exact DON-/ORD- reference). Prefer WhatsApp for personal lookups.
 - Orders don't reserve stock until paid (oversell handled safely, but needs a human to refund/fulfil).
 - Admin product create/update passes `req.body` straight to Prisma (admin-only).
+
+---
+# Update 2026-10-27 (round 2): shipment 400, Trust knowledge, product photos
+
+| Problem | Root cause | Fix |
+|---|---|---|
+| Admin "Create shipment" → `Request failed with status code 400` | The Shiprocket payload was incomplete/invalid: `billing_address` was sent as the stored JSON object (not text), no city, state, pincode, phone, email, sku or `payment_method`; pickup location hard-coded to `Primary`; empty `channel_id`; AWB/courier was never assigned (Shiprocket needs a second call); and the real Shiprocket error text was swallowed. | New `shipOrder`: builds the full payload (address text, city/state from PIN via India Post with text fallback, 10-digit phone, email, sku, Prepaid, weight/dimensions), reads the pickup location from `SHIPROCKET_PICKUP_LOCATION` or your Shiprocket account, calls `courier/assign/awb`, and shows Shiprocket's real validation message in the admin alert. If the Shiprocket order is created but the courier step fails (e.g. wallet balance), pressing Create shipment again only retries the courier step (no duplicate). |
+| Bot has no Trust information | Production boot only created a placeholder doc ("Add the Trust-approved mission…"); the real text lived in `prisma/trust-knowledge.ts`, used only by the manual seed script. Gemini therefore received nothing. | Verified knowledge (from your website pages) now in `src/services/trust-knowledge.ts`, loaded on every boot (replaces the placeholder / old seed; hand-edited admin documents are never overwritten). Keyword search fallback answers Hinglish questions even if Gemini is off, rate-limited or empty. |
+| "Trust ka address kahan hai" treated as order tracking | `kahan hai` matched the tracking intent | Tracking intent now needs order/parcel context |
+| Product photos not on WhatsApp | Bot only sent text | Photo (admin's Cloudinary image, forced to a 1000px JPEG) sent with price questions, when starting checkout, and for "Nariyal photo". Failure to send a photo never blocks the text. |
+
+New env vars (all optional): `SHIPROCKET_PICKUP_LOCATION` (exact pickup nickname from Shiprocket), `SHIPROCKET_FALLBACK_EMAIL`, `SHIPROCKET_DEFAULT_WEIGHT_KG` (default 0.5 per item). New migration `20261027120000_shiprocket_shipment_id`.
+
+Shiprocket checklist: create an API user (Settings → API) and use *its* email/password in `SHIPROCKET_EMAIL/PASSWORD`; add a pickup address; keep wallet balance; the customer's PIN must be serviceable.
+Photos: only public `https://` images work (Cloudinary uploads from the admin panel do). Photos must be under 5 MB.
+Tests: 35 + 22 unit, 55 end-to-end checks pass. Not verified live: Shiprocket's real API (payload validated against Shiprocket's documented required fields with a mock).

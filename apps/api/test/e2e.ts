@@ -24,11 +24,15 @@ const { PrismaPg } = require('@prisma/adapter-pg');
 const db = new testClient.PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) });
 
 // ---- fakes
-type Sent = { to: string; kind: 'text' | 'pdf' | 'doc'; text?: string; filename?: string; bytes?: number };
+type Sent = { to: string; kind: 'text' | 'pdf' | 'doc' | 'image'; text?: string; filename?: string; bytes?: number; url?: string };
 const outbox: Sent[] = [];
 const rzp = new Map<string, { state: 'paid' | 'unpaid' | 'expired'; amountPaidPaise: number; paymentId?: string }>();
 let linkSeq = 0;
 let failLinkCreation = false;
+let failImage = false;
+let awbFail = false;
+const shipCalls: any[] = [];
+let assignCalls = 0;
 
 const origLoad = (Module as any)._load;
 (Module as any)._load = function (request: string, parent: any, isMain: boolean) {
@@ -41,7 +45,28 @@ const origLoad = (Module as any)._load;
     return { ...real,
       sendWhatsAppText: async (to: string, text: string) => { outbox.push({ to, kind: 'text', text }); return { ok: true }; },
       sendWhatsAppPdf: async (to: string, pdf: Buffer, filename: string) => { assert.ok(pdf.slice(0, 4).toString() === '%PDF', 'receipt must be a real PDF'); outbox.push({ to, kind: 'pdf', filename, bytes: pdf.length }); return { ok: true }; },
+      sendWhatsAppImage: async (to: string, url: string, caption?: string) => { if (failImage) throw new Error('image rejected'); outbox.push({ to, kind: 'image', url, text: caption }); return { ok: true }; },
       sendWhatsAppDocument: async (to: string, _l: string, filename: string) => { outbox.push({ to, kind: 'doc', filename }); return { ok: true }; },
+    };
+  }
+  if (resolved.endsWith('/integrations/shiprocket.ts')) {
+    return { ...real,
+      getPickupLocation: async () => 'Primary',
+      createShipment: async (p: any) => {
+        // Mirror Shiprocket's mandatory-field validation (this is what produced the HTTP 400 before)
+        const bad: string[] = [];
+        if (typeof p.billing_address !== 'string' || p.billing_address.length < 3) bad.push('billing_address must be a string');
+        if (!p.billing_city) bad.push('billing_city'); if (!p.billing_state) bad.push('billing_state');
+        if (!/^\d{6}$/.test(String(p.billing_pincode))) bad.push('billing_pincode'); if (!/^\d{10}$/.test(String(p.billing_phone))) bad.push('billing_phone');
+        if (!p.billing_email) bad.push('billing_email'); if (!p.billing_customer_name) bad.push('billing_customer_name');
+        if (!/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(p.order_date)) bad.push('order_date format'); if (p.payment_method !== 'Prepaid') bad.push('payment_method');
+        if (!p.pickup_location) bad.push('pickup_location'); if (!(p.weight > 0) || !p.length || !p.breadth || !p.height) bad.push('dimensions');
+        for (const i of p.order_items || []) if (!i.name || !i.sku || !(i.units > 0) || !(i.selling_price >= 0)) bad.push('order_items');
+        if (!p.order_items?.length) bad.push('order_items empty');
+        if (bad.length) throw new Error('Shiprocket: Validation failed: ' + bad.join(', ') + ' (HTTP 422)');
+        shipCalls.push(p); return { order_id: 555, shipment_id: 777, awb_code: '', courier_name: '' };
+      },
+      assignAwb: async () => { assignCalls++; if (awbFail) throw new Error('Insufficient wallet balance'); return { awb: 'AWB123456', courier: 'Delhivery' }; },
     };
   }
   if (resolved.endsWith('/integrations/razorpay.ts')) {
@@ -61,6 +86,8 @@ const origLoad = (Module as any)._load;
 import express from 'express';
 const webhooks = require('../src/routes/webhooks').default;
 const payments = require('../src/services/payments');
+const fulfillment = require('../src/services/fulfillment');
+const { trustKnowledge } = require('../src/services/trust-knowledge');
 
 const app = express();
 app.use(express.json({ verify: (req: any, _r, buf) => { req.rawBody = buf.toString(); } }));
@@ -95,7 +122,7 @@ async function test(name: string, fn: () => Promise<void>) {
 }
 
 async function reset() {
-  for (const t of ['Message', 'SupportTicket', 'Conversation', 'OrderItem', 'Order', 'Donation', 'WebhookEvent', 'Product', 'User']) await db.$executeRawUnsafe(`DELETE FROM "${t}"`);
+  for (const t of ['Message', 'SupportTicket', 'Conversation', 'OrderItem', 'Order', 'Donation', 'WebhookEvent', 'KnowledgeDocument', 'Product', 'User']) await db.$executeRawUnsafe(`DELETE FROM "${t}"`);
   outbox.length = 0; rzp.clear();
   await db.product.createMany({ data: [
     { name: 'Gangajal', slug: 'gangajal', description: 'Add product description', price: 400, stock: 5 },
@@ -106,6 +133,7 @@ async function reset() {
     { name: 'Handmade Diya', slug: 'handmade-diya', description: 'demo', price: 199, stock: 50 },
   ] });
   await db.user.create({ data: { phone: PHONE, name: 'Surya Pratap Singh Solanki' } });
+  await db.knowledgeDocument.create({ data: { title: 'Trust FAQ & Policies', content: trustKnowledge } });
 }
 
 (async () => {
@@ -329,6 +357,80 @@ async function reset() {
   });
   await test('LLM-free: an unknown question falls through to the grounded fallback, not a product list', async () => {
     const t = texts(await wa(PHONE, 'Trust ka timing kya hai')); assert.doesNotMatch(t, /Gangajal|₹/);
+  });
+
+
+  console.log('\nTRUST KNOWLEDGE (client complaint: "bot ke paas Trust ki jankari nahi")');
+  await reset();
+  const ask = async (q: string) => texts(await wa(PHONE, q));
+  await test('"Trust ke baare me bataiye" answers from the knowledge base', async () => assert.match(await ask('Trust ke baare me bataiye'), /04 September 2014/));
+  await test('"Trust ka address kahan hai" -> real address', async () => assert.match(await ask('Trust ka address kahan hai'), /Section 26, Ulhasnagar-4/));
+  await test('"contact number kya hai" -> real phone', async () => assert.match(await ask('contact number kya hai'), /6913001300/));
+  await test('"langar kya hai" is NOT hijacked into the shop flow', async () => { const t = await ask('Trust me langar kab hota hai'); assert.match(t, /1,50,000/); assert.doesNotMatch(t, /Gangajal|₹/); });
+  await test('"Trust me kya kya seva hoti hai" does not show the product list', async () => assert.doesNotMatch(await ask('Trust me kya kya seva hoti hai'), /Gangajal|₹/));
+  await test('unknown topic -> honest fallback, no invented facts', async () => { const t = await ask('bitcoin ka rate kya hai'); assert.doesNotMatch(t, /Ulhasnagar|₹/); });
+
+  console.log('\nPRODUCT IMAGES');
+  await db.product.updateMany({ where: { name: 'Nariyal' }, data: { imageUrl: 'https://res.cloudinary.com/demo/image/upload/v1/amrit-vela-trust/nariyal.png' } });
+  await test('price question sends the admin-uploaded photo (JPEG-normalised) + price text', async () => {
+    const sent = await wa(PHONE, 'Nariyal kitne ka hai');
+    const img = sent.find((m) => m.kind === 'image'); assert.ok(img, 'image must be sent');
+    assert.match(img!.url!, /f_jpg,q_auto,w_1000/); assert.match(img!.text!, /Nariyal — ₹100/); assert.match(texts(sent), /₹100/);
+    assert.ok(sent.findIndex((m) => m.kind === 'image') < sent.findIndex((m) => m.kind === 'text'), 'image comes first');
+  });
+  await test('"Nariyal photo" -> photo', async () => assert.ok((await wa(PHONE, 'Nariyal photo bhejo')).some((m) => m.kind === 'image')));
+  await test('starting checkout shows the product photo', async () => { const sent = await wa(PHONE, 'Nariyal kharidna h'); assert.ok(sent.some((m) => m.kind === 'image')); await wa(PHONE, 'cancel'); });
+  await test('product without a photo: honest text, no crash', async () => assert.match(texts(await wa(PHONE, 'Mala ki photo dikhao')), /photo abhi available nahi/));
+  await test('image delivery failure never blocks the text answer', async () => { failImage = true; const sent = await wa(PHONE, 'Nariyal kitne ka hai'); failImage = false; assert.match(texts(sent), /₹100/); });
+
+  console.log('\nSHIPMENT (client complaint: "Request failed with status code 400")');
+  const paidOrder = async (text: string, address: string) => {
+    await reset(); await wa(PHONE, text); await wa(PHONE, address); await wa(PHONE, 'haan');
+    const o = await db.order.findFirstOrThrow();
+    await fulfillment.markOrderPaid(o.id, 'pay_SHIP'); return db.order.findUniqueOrThrow({ where: { id: o.id } });
+  };
+  await test('WhatsApp-created order ships: full Shiprocket payload, AWB saved, customer notified', async () => {
+    shipCalls.length = 0; assignCalls = 0; const o = await paidOrder('2 nariyal chahiye', ADDR); outbox.length = 0;
+    const res = await fulfillment.shipOrder(o.id);
+    const p = shipCalls[0]; assert.equal(p.billing_city, 'Vidisha'); assert.equal(p.billing_state, 'Madhya Pradesh'); assert.equal(p.billing_pincode, '464001');
+    assert.equal(p.billing_phone, '9876500001'.replace('9876500001', PHONE.slice(-10))); assert.equal(p.order_items[0].sku, 'nariyal'); assert.equal(p.order_items[0].units, 2); assert.equal(p.sub_total, 200);
+    assert.equal(res.status, 'SHIPPED'); assert.equal(res.awb, 'AWB123456'); assert.equal(res.shiprocketShipmentId, '777');
+    assert.match(texts(outbox), /AWB: AWB123456/);
+  });
+  await test('shipping twice never creates a duplicate Shiprocket order', async () => {
+    const o = await db.order.findFirstOrThrow(); shipCalls.length = 0; await fulfillment.shipOrder(o.id); assert.equal(shipCalls.length, 0);
+  });
+  await test('website-style order (plain string address) ships too', async () => {
+    shipCalls.length = 0; await reset();
+    const u = await db.user.findUniqueOrThrow({ where: { phone: PHONE } }); const prod = await db.product.findFirstOrThrow({ where: { name: 'Mala' } });
+    const o = await db.order.create({ data: { orderNumber: 'ORD-WEB-1', userId: u.id, subtotal: 10, shippingFee: 80, total: 90, address: 'Flat 4, Shanti Nagar, Ulhasnagar, Maharashtra 421004', paymentStatus: 'PAID', status: 'CONFIRMED', items: { create: [{ productId: prod.id, quantity: 1, unitPrice: 10 }] } } });
+    const res = await fulfillment.shipOrder(o.id); assert.equal(res.status, 'SHIPPED'); assert.equal(shipCalls[0].billing_state, 'Maharashtra'); assert.equal(typeof shipCalls[0].billing_address, 'string');
+  });
+  await test('courier assignment fails (wallet) -> clear message, Shiprocket order saved, retry does NOT recreate it', async () => {
+    shipCalls.length = 0; assignCalls = 0; awbFail = true; const o = await paidOrder('Mala chahiye', ADDR);
+    await assert.rejects(() => fulfillment.shipOrder(o.id), /Insufficient wallet balance/);
+    let cur = await db.order.findUniqueOrThrow({ where: { id: o.id } }); assert.equal(cur.status, 'PROCESSING'); assert.equal(cur.shiprocketShipmentId, '777'); assert.equal(shipCalls.length, 1);
+    awbFail = false; const res = await fulfillment.shipOrder(o.id);
+    assert.equal(shipCalls.length, 1, 'no second create'); assert.equal(res.status, 'SHIPPED'); assert.equal(res.awb, 'AWB123456');
+  });
+  await test('address without PIN gives a readable error (not "status code 400")', async () => {
+    await reset(); const u = await db.user.findUniqueOrThrow({ where: { phone: PHONE } }); const prod = await db.product.findFirstOrThrow({ where: { name: 'Mala' } });
+    const o = await db.order.create({ data: { orderNumber: 'ORD-NOPIN', userId: u.id, subtotal: 10, shippingFee: 80, total: 90, address: 'somewhere in vidisha town', paymentStatus: 'PAID', items: { create: [{ productId: prod.id, quantity: 1, unitPrice: 10 }] } } });
+    await assert.rejects(() => fulfillment.shipOrder(o.id), /6-digit PIN/);
+  });
+  await test('unpaid order cannot be shipped', async () => {
+    await reset(); await wa(PHONE, 'Mala chahiye'); await wa(PHONE, ADDR); await wa(PHONE, 'haan'); const o = await db.order.findFirstOrThrow();
+    await assert.rejects(() => fulfillment.shipOrder(o.id), /must be paid/);
+  });
+
+  console.log('\nBOOTSTRAP KNOWLEDGE LOADER');
+  await test('placeholder knowledge doc is replaced with the verified Trust knowledge on boot', async () => {
+    process.env.ADMIN_EMAIL = 'a@b.co'; process.env.ADMIN_PASSWORD = 'password-12345';
+    await reset(); await db.knowledgeDocument.deleteMany();
+    await db.knowledgeDocument.create({ data: { title: 'Trust FAQ & Policies', content: 'Add the Trust-approved mission, contact details, donation policy...' } });
+    delete require.cache[require.resolve('../src/bootstrap')]; require('../src/bootstrap');
+    await new Promise((r) => setTimeout(r, 1500));
+    const doc = await db.knowledgeDocument.findFirstOrThrow({ where: { title: 'Trust FAQ & Policies' } }); assert.match(doc.content, /KB_VERSION:2/); assert.match(doc.content, /Ulhasnagar-4/);
   });
 
   console.log(`\n${passed} e2e checks passed${process.exitCode ? ' — WITH FAILURES' : ''}`);

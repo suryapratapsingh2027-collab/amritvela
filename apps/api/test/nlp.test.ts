@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { findProducts, parseAmount, isPaymentClaim, isReceiptRequest, hasDonationIntent, hasBuyIntent, validateAddress, parseQuantity, isGreeting, isYes, isCancelOrMenu, validateName, extractPin } from '../src/services/bot-nlp';
+import { hasTrackIntent, findProducts, parseAmount, isPaymentClaim, isReceiptRequest, hasDonationIntent, hasBuyIntent, validateAddress, parseQuantity, isGreeting, isYes, isCancelOrMenu, validateName, extractPin } from '../src/services/bot-nlp';
 
 const P = [
   { id: 'g', name: 'Gangajal' }, { id: 'm', name: 'Mala' }, { id: 'n', name: 'Nariyal' },
@@ -50,4 +50,5 @@ t('quantity', () => { const r = findProducts('2 nariyal chahiye', P); assert.equ
 t('greeting / yes / menu', () => { assert.equal(isGreeting('Hello'), true); assert.equal(isGreeting('Namaste ji'), true); assert.equal(isYes('Haan'), true); assert.equal(isCancelOrMenu('menu'), true); assert.equal(isGreeting('hello mala chahiye'), false); });
 t('name validation', () => { assert.equal(validateName('Haan').ok, false); assert.equal(validateName('Surya Pratap Singh').ok, true); assert.equal(validateName('464001').ok, false); });
 t('buy intent', () => { assert.equal(hasBuyIntent('Nariyal kharidna h'), true); assert.equal(hasBuyIntent('Nariyal order karna h'), true); assert.equal(hasBuyIntent('hello'), false); });
+t('track intent: order questions yes, Trust address question no', () => { assert.equal(hasTrackIntent('mera order kahan hai'), true); assert.equal(hasTrackIntent('order status'), true); assert.equal(hasTrackIntent('Trust ka address kahan hai'), false); assert.equal(hasTrackIntent('Trust ka ashram kahan hai'), false); });
 console.log(`\n${n} tests passed`);
