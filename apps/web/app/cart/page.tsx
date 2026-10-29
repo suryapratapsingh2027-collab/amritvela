@@ -44,15 +44,28 @@ export default function Cart() {
   const delivery = subtotal > 0 && subtotal < 1000 ? 80 : 0;
   const total = subtotal + delivery;
 
+  const cleanPhone = phone.replace(/\D/g, '').replace(/^(91|0)(?=\d{10}$)/, '');
+
+  /** Returns a message when the delivery details are not good enough to ship, so the customer is told instead of nothing happening. */
+  function detailsError(): string | null {
+    if (name.trim().length < 2) return 'Kripya apna poora naam likhein.';
+    if (!/^[6-9]\d{9}$/.test(cleanPhone)) return 'Kripya sahi 10-digit mobile number likhein.';
+    if (email.trim() && !/^\S+@\S+\.\S+$/.test(email.trim())) return 'Email sahi nahi hai. Email optional hai, khali bhi chhod sakte hain.';
+    if (address.trim().length < 15 || !/(?<!\d)[1-9]\d{5}(?!\d)/.test(address)) return 'Kripya poora delivery address 6-digit PIN code ke saath likhein.';
+    return null;
+  }
+
   async function placeOrder() {
-    if (!name || !phone || !address || !cart.length) return;
+    if (!cart.length) return;
+    const problem = detailsError();
+    if (problem) { setCheckout(false); alert(problem); return; }
     setBusy(true);
     try {
       const result = await api<any>('/api/orders', {
         method: 'POST',
         body: JSON.stringify({
-          phone,
-          name,
+          phone: cleanPhone,
+          name: name.trim(),
           email,
           address,
           items: cart.map((item) => ({ productId: item.product.id, quantity: item.quantity })),
@@ -76,13 +89,17 @@ export default function Cart() {
         order_id: result.payment.id,
         prefill: { name, email, contact: phone },
         handler: async (response: any) => {
-          const paid = await api<any>(`/api/orders/${result.order.id}/verify`, {
-            method: 'POST',
-            body: JSON.stringify({ razorpayPaymentId: response.razorpay_payment_id, razorpaySignature: response.razorpay_signature }),
-          });
-          setOrder(paid);
-          localStorage.removeItem('amritvela_cart');
-          setCart([]);
+          try {
+            const paid = await api<any>(`/api/orders/${result.order.id}/verify`, {
+              method: 'POST',
+              body: JSON.stringify({ razorpayPaymentId: response.razorpay_payment_id, razorpaySignature: response.razorpay_signature }),
+            });
+            setOrder(paid);
+            localStorage.removeItem('amritvela_cart');
+            setCart([]);
+          } catch {
+            alert(`Aapka payment mil gaya hai (order ${result.order.orderNumber}), par confirmation page abhi load nahi ho paaya. Order thodi der me apne aap confirm ho jaayega. Zaroorat ho to Trust team se 6913001300 par sampark karein.`);
+          }
         },
       });
       razorpay.open();
@@ -151,16 +168,16 @@ export default function Cart() {
                 <h2>Delivery details</h2>
                 <div style={{ display: 'grid', gap: 11, marginTop: 22 }}>
                   <input className="input" placeholder="Full name" value={name} onChange={(e) => setName(e.target.value)} required />
-                  <input className="input" placeholder="Mobile / WhatsApp" value={phone} onChange={(e) => setPhone(e.target.value)} required />
+                  <input className="input" placeholder="Mobile / WhatsApp (10-digit)" inputMode="tel" value={phone} onChange={(e) => setPhone(e.target.value)} required />
                   <input className="input" type="email" placeholder="Email (optional)" value={email} onChange={(e) => setEmail(e.target.value)} />
-                  <textarea className="input" placeholder="Full delivery address" value={address} onChange={(e) => setAddress(e.target.value)} style={{ minHeight: 120, resize: 'vertical' }} required />
+                  <textarea className="input" placeholder="Poora delivery address (ghar/gali, area, city, state, 6-digit PIN code)" value={address} onChange={(e) => setAddress(e.target.value)} style={{ minHeight: 120, resize: 'vertical' }} required />
                 </div>
                 <div style={{ borderTop: '1px solid var(--line)', marginTop: 22, paddingTop: 18, display: 'grid', gap: 9 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--muted)', fontSize: 13 }}><span>Subtotal</span><strong>₹{subtotal}</strong></div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--muted)', fontSize: 13 }}><span>Delivery</span><strong>₹{delivery}</strong></div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 18, marginTop: 5 }}><strong>Total</strong><strong>₹{total}</strong></div>
                 </div>
-                <button type="button" className="btn btn-primary" style={{ width: '100%', marginTop: 20 }} disabled={busy} onClick={() => setCheckout(true)}>{busy ? 'Preparing…' : 'Continue to payment'}</button>
+                <button type="button" className="btn btn-primary" style={{ width: '100%', marginTop: 20 }} disabled={busy} onClick={() => { const problem = detailsError(); if (problem) alert(problem); else setCheckout(true); }}>{busy ? 'Preparing…' : 'Continue to payment'}</button>
               </div>
             </div>
           )}
@@ -171,7 +188,7 @@ export default function Cart() {
             <div className="form-card" style={{ width: 'min(520px,100%)' }}>
               <span className="section-kicker"><span>03</span> Confirm</span>
               <h2 style={{ fontSize: '2.4rem', marginTop: 12 }}>Ready to pay?</h2>
-              <p style={{ color: 'var(--muted)', lineHeight: 1.7 }}>Your order total is <strong>₹{total}</strong>. Continue to Razorpay when production credentials are configured, or the safe mock flow will be used in development.</p>
+              <p style={{ color: 'var(--muted)', lineHeight: 1.7 }}>Aapke order ka total <strong>₹{total}</strong> hai. Aage badhne par secure Razorpay payment window khulegi.</p>
               <div style={{ display: 'flex', gap: 10, marginTop: 22 }}>
                 <button type="button" className="btn btn-secondary" onClick={() => setCheckout(false)}>Go back</button>
                 <button type="button" className="btn btn-primary" style={{ flex: 1 }} disabled={busy} onClick={placeOrder}>{busy ? 'Preparing payment…' : 'Pay securely'}</button>

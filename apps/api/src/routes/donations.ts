@@ -4,6 +4,7 @@ import { createPayment, verifyCheckoutSignature } from '../integrations/razorpay
 import { createAndSendDonationLink } from '../services/donation-payment-link';
 import { auth } from '../middleware/auth';
 import { env } from '../config';
+import { normalizePhone } from '../utils/phone';
 import { makeReceipt } from '../services/receipt';
 import { deliverDonationReceipt, markDonationPaid } from '../services/payments';
 
@@ -14,7 +15,9 @@ const r = Router();
 r.post('/whatsapp-link', async (req, res) => {
   try {
     const { phone, name, email, amount } = req.body || {};
-    const result = await createAndSendDonationLink({ phone: String(phone || '').trim(), name, email, amount: Number(amount) });
+    const normalized = normalizePhone(phone);
+    if (!normalized) return res.status(400).json({ error: 'Valid 10-digit mobile number required' });
+    const result = await createAndSendDonationLink({ phone: normalized, name, email, amount: Number(amount) });
     return res.status(201).json({ success: true, ...result });
   } catch (error: any) {
     console.error('[DONATION PAYMENT LINK ERROR]', error?.message || error);
@@ -24,9 +27,11 @@ r.post('/whatsapp-link', async (req, res) => {
 
 r.post('/', async (req, res) => {
   try {
-    const { phone, name, email, amount } = req.body || {};
+    const { name, email, amount } = req.body || {};
+    const phone = normalizePhone(req.body?.phone);
     const value = Number(amount);
-    if (!phone || !Number.isSafeInteger(value) || value <= 0 || value > 10000000) {
+    if (!phone) return res.status(400).json({ error: 'Kripya sahi 10-digit mobile number likhein.' });
+    if (!Number.isSafeInteger(value) || value <= 0 || value > 10000000) {
       return res.status(400).json({ error: 'phone and a whole-number donation amount between ₹1 and ₹1,00,00,000 are required' });
     }
     const user = await db.user.upsert({ where: { phone }, update: { name, email }, create: { phone, name, email } });

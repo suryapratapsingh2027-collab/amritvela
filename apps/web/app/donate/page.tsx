@@ -17,6 +17,9 @@ export default function Donate() {
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const value = Number(amount);
+    if (!Number.isInteger(value) || value < 1) { alert('Kripya poore rupaye me donation amount likhein, jaise 500.'); return; }
+    if (!/^[6-9]\d{9}$/.test(phone.replace(/\D/g, '').replace(/^(91|0)(?=\d{10}$)/, ''))) { alert('Kripya sahi 10-digit mobile number likhein (receipt isi number se jude rahegi).'); return; }
     setLoading(true);
     try {
       const result = await api<any>('/api/donations', { method: 'POST', body: JSON.stringify({ amount: Number(amount), name, phone, email }) });
@@ -34,8 +37,13 @@ export default function Donate() {
         order_id: result.payment.id,
         prefill: { name, email, contact: phone },
         handler: async (response: any) => {
-          const paid = await api<any>(`/api/donations/${result.donationId}/verify`, { method: 'POST', body: JSON.stringify({ razorpayPaymentId: response.razorpay_payment_id, razorpaySignature: response.razorpay_signature }) });
-          setDone(paid.donation || paid);
+          try {
+            const paid = await api<any>(`/api/donations/${result.donationId}/verify`, { method: 'POST', body: JSON.stringify({ razorpayPaymentId: response.razorpay_payment_id, razorpaySignature: response.razorpay_signature }) });
+            setDone(paid.donation || paid);
+          } catch {
+            // The payment itself succeeded at Razorpay; our webhook/reconciliation will still mark it paid.
+            alert('Aapka payment Razorpay par mil gaya hai, par confirmation page abhi load nahi ho paaya. Chinta na karein, donation thodi der me confirm ho jaayega. Zaroorat ho to Trust team se 6913001300 par sampark karein.');
+          }
         },
       });
       razorpay.open();

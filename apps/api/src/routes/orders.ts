@@ -7,23 +7,26 @@ import { auth } from '../middleware/auth';
 import { markOrderPaid, shipOrder } from '../services/fulfillment';
 import { makeInvoice } from '../services/receipt';
 import { env } from '../config';
-import { shippingFor } from '../services/pricing';
+import { shippingFor, isSellable } from '../services/pricing';
+import { normalizePhone } from '../utils/phone';
+import { extractPin } from '../services/shipping-address';
 
 const r = Router();
 
 r.post('/', async (req, res) => {
   try {
-    const { phone, name, email, address, items } = req.body || {};
+    const { name, email, items } = req.body || {};
+    const phone = normalizePhone(req.body?.phone);
+    const address = String(req.body?.address || '').replace(/\s+/g, ' ').trim();
 
-    if (!phone || !address || !Array.isArray(items) || !items.length) {
-      return res.status(400).json({
-        error: 'phone, address and items are required',
-      });
-    }
+    if (!phone) return res.status(400).json({ error: 'Kripya sahi 10-digit mobile number likhein.' });
+    if (!String(name || '').trim() || String(name).trim().length < 2) return res.status(400).json({ error: 'Kripya apna poora naam likhein.' });
+    if (address.length < 15 || !extractPin(address)) return res.status(400).json({ error: 'Kripya poora address 6-digit PIN code ke saath likhein.' });
+    if (!Array.isArray(items) || !items.length || items.length > 30) return res.status(400).json({ error: 'Cart khali hai.' });
 
     const clean = items.map((i: any) => ({
       productId: String(i.productId),
-      quantity: Math.max(1, Math.floor(Number(i.quantity))),
+      quantity: Math.min(100, Math.max(1, Math.floor(Number(i.quantity)) || 1)),
     }));
 
     const products = await db.product.findMany({
@@ -33,7 +36,7 @@ r.post('/', async (req, res) => {
       },
     });
 
-    if (products.length !== new Set(clean.map((i: { productId: string }) => i.productId)).size) {
+    if (products.some((p) => !isSellable(p)) || products.length !== new Set(clean.map((i: { productId: string }) => i.productId)).size) {
       return res.status(400).json({
         error: 'One or more products are unavailable',
       });
@@ -50,7 +53,7 @@ r.post('/', async (req, res) => {
       }
 
       if (p.stock < i.quantity) {
-        throw new Error(`${p.name} has only ${p.stock} left`);
+        throw new Error(`${p.name} ki itni quantity abhi available nahi hai. Cart me quantity kam karein.`);
       }
 
       return {

@@ -49,6 +49,7 @@ t('pickup location: documented shape, variants, verified preferred, none', () =>
   assert.equal(extractPickupLocation({ shipping_address: [{ pickup_location: ' Primary ' }] }), 'Primary');
   assert.equal(extractPickupLocation({ data: [{ pickup_location: 'X' }] }), 'X');
   assert.equal(extractPickupLocation({ data: { shipping_address: [] } }), null);
+  assert.equal(extractPickupLocation({ message: 'Wrong Pickup location entered. Please choose one location from the data given', data: { data: [{ phone_verified: 1, id: 137153118, pickup_location: 'warehouse', city: 'Bhopal' }] } }), 'warehouse');
   assert.equal(extractPickupLocation(null), null);
 });
 console.log(`\n${n} knowledge/shipping tests passed`);

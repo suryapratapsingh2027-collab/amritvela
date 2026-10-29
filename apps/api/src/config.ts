@@ -21,6 +21,16 @@ const schema = z
 
     ADMIN_EMAIL: z.string().email().default('admin@example.com'),
     ADMIN_PASSWORD: z.string().min(6).default('change-me'),
+    // true = on every boot, reset the ADMIN_EMAIL account's password to ADMIN_PASSWORD (emergency recovery). Default: only create the first admin.
+    ADMIN_RESET_ON_BOOT: z.enum(['true', 'false']).default('false'),
+
+    // Outgoing email (password reset). If unset, reset links are printed in the server log instead.
+    SMTP_HOST: z.string().optional(),
+    SMTP_PORT: z.coerce.number().int().default(465),
+    SMTP_SECURE: z.enum(['true', 'false']).optional(),
+    SMTP_USER: z.string().optional(),
+    SMTP_PASS: z.string().optional(),
+    SMTP_FROM: z.string().optional(),
 
     // Gemini AI
     GEMINI_API_KEY: z.string().optional(),

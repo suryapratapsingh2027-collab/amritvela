@@ -20,7 +20,8 @@ app.set('trust proxy', 1);
 
 // Allowed frontend origins
 const allowedOrigins = [
-  env.WEB_URL,
+  // A trailing slash in WEB_URL would never equal the browser's Origin header and silently block every API call.
+  env.WEB_URL?.trim().replace(/\/+$/, ''),
   'http://localhost:3000',
   'http://127.0.0.1:3000',
   'https://web-l9dbq09an-suryapratapsingh2027-collabs-projects.vercel.app',
@@ -101,13 +102,17 @@ app.use('/api/webhooks', webhooks);
 // Error handler
 app.use(
   (err: any, _req: any, res: any, _next: any) => {
-    console.error(err);
+    const status = Number(err?.status || err?.statusCode) || 500;
+    if (status >= 500) console.error(err);
+    else console.warn('[HTTP]', status, err?.message);
 
-    res.status(500).json({
+    if (err?.type === 'entity.too.large') return res.status(413).json({ error: 'Upload is too large.' });
+    if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON request body.' });
+    res.status(status >= 400 && status < 600 ? status : 500).json({
       error:
-        env.NODE_ENV === 'production'
-          ? 'Internal server error'
-          : err.message || 'Internal server error',
+        status < 500 || env.NODE_ENV !== 'production'
+          ? err?.message || 'Request failed'
+          : 'Internal server error',
     });
   }
 );

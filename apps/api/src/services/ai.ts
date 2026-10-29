@@ -116,9 +116,9 @@ async function getLiveContext(
     });
     const products = all.filter(isSellable);
     if (products.length) {
-      sections.push('LIVE PRODUCTS (prices are database values; stock 0 means unavailable):\n' + products.map((p) => {
+      sections.push('LIVE PRODUCTS (prices are database values; never reveal stock quantities, only say whether a product is available):\n' + products.map((p) => {
         const desc = /^add product description$/i.test(p.description.trim()) ? '' : ` | Description: ${p.description}`;
-        return `${p.name}${desc} | Price: ${money(p.price)} | ${p.stock > 0 ? `In stock: ${p.stock}` : 'Out of stock'}`;
+        return `${p.name}${desc} | Price: ${money(p.price)} | ${p.stock > 0 ? 'Available' : 'Out of stock'}`;
       }).join('\n'));
     } else {
       sections.push('LIVE PRODUCTS: No active products are currently listed in the database. Do not invent products or prices.');
@@ -182,7 +182,7 @@ function mockReply(text: string, intent: AssistantIntent, context: string): Assi
   }
   if (intent === 'SHOP') {
     const products = context.match(/LIVE PRODUCTS[\s\S]*/)?.[0];
-    return { text: products ? `Hamare current products:\n${products.replace('LIVE PRODUCTS (prices are database values; stock 0 means unavailable):\n', '').trim()}\n\nOrder karne ke liye product ka naam likhein, jaise "Nariyal kharidna hai".` : 'Abhi product ki verified price/stock information available nahi hai. Kripya Trust team se 6913001300 par contact karein.', intent };
+    return { text: products ? `Hamare current products:\n${products.replace('LIVE PRODUCTS (prices are database values; never reveal stock quantities, only say whether a product is available):\n', '').trim()}\n\nOrder karne ke liye product ka naam likhein, jaise "Nariyal kharidna hai".` : 'Abhi product ki verified price/stock information available nahi hai. Kripya Trust team se 6913001300 par contact karein.', intent };
   }
   if (intent === 'TRACK') return { text: 'Order status check karne ke liye apna order number (ORD-...) bhejein. Main isi WhatsApp number se linked order hi check kar sakta hoon.', intent };
   if (intent === 'HUMAN') return { text: 'Aapki human support request note kar li gayi hai. Trust team se 6913001300 ya amritvelatrustlive@gmail.com par contact karein.', intent };

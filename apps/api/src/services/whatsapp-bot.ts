@@ -28,7 +28,7 @@ const SUPPORT = 'Agar dikkat aaye to Trust team se 6913001300 par sampark karein
 const STATE_TTL_MS = 30 * 60 * 1000;
 
 export type BotReply = { text: string; intent: string; image?: { url: string; caption: string }; after?: () => Promise<void> };
-type Ctx = { phone: string; text: string; conversationId: string };
+type Ctx = { phone: string; text: string; conversationId: string; channel?: 'whatsapp' | 'web' };
 
 type State =
   | { step: 'AWAIT_PRODUCT'; at: number }
@@ -70,11 +70,15 @@ async function loadProducts(): Promise<ProductRow[]> {
 
 const MENU = 'Namaste! Amrit Vela Trust mein aapka swagat hai. 🙏\n\nMain in cheezon mein madad kar sakta hoon:\n• Donation — likhein "Donation 500"\n• Product order — likhein "Nariyal kharidna hai" ya "products"\n• Donation receipt — likhein "receipt"\n• Order status — apna order number (ORD-...) bhejein\n• Trust ke baare mein koi bhi sawaal\n\nKisi insaan se baat karni ho to "human" likhein.';
 
+/** Stock numbers are never shown to customers: a product is either orderable or it is "not in stock". */
+const stockNote = (p: ProductRow) => (p.stock > 0 ? '' : ' — abhi stock mein nahi hai');
+
 function productList(products: ProductRow[]): string {
-  if (!products.length) return `Abhi koi product order ke liye available nahi hai. ${SUPPORT}`;
+  const available = products.filter((p) => p.stock > 0);
+  if (!available.length) return `Abhi koi product order ke liye available nahi hai. ${SUPPORT}`;
   return 'Aap kaunsa product order karna chahte hain?\n' +
-    products.map((p) => `• ${p.name} — ${money(p.price)} — ${p.stock > 0 ? `${p.stock} available` : 'Out of stock'}`).join('\n') +
-    '\n\nProduct ka naam bhejein, jaise "' + (products.find((p) => p.stock > 0)?.name || products[0].name) + '". Kisi product ki photo ke liye "' + products[0].name + ' photo" likhein. Cancel karne ke liye "cancel" likhein.';
+    available.map((p) => `• ${p.name} — ${money(p.price)}`).join('\n') +
+    '\n\nProduct ka naam bhejein, jaise "' + available[0].name + '". Kisi product ki photo ke liye "' + available[0].name + ' photo" likhein. Cancel karne ke liye "cancel" likhein.';
 }
 
 const ORDER_STATUS_TEXT: Record<string, string> = {
@@ -198,12 +202,12 @@ async function handlePaymentQuery(ctx: Ctx, text: string, refs: { donRef: string
     }
   }
 
-  if (donation) return donationStatusReply(donation.id);
-  if (order) return orderStatusReply(order.id, /invoice|receipt|bill|रसीद/i.test(text));
+  if (donation) return donationStatusReply(donation.id, ctx.channel);
+  if (order) return orderStatusReply(order.id, /invoice|receipt|bill|रसीद/i.test(text), ctx.channel);
   return null;
 }
 
-async function donationStatusReply(donationId: string): Promise<BotReply> {
+async function donationStatusReply(donationId: string, channel: 'whatsapp' | 'web' = 'whatsapp'): Promise<BotReply> {
   let rec;
   try { rec = await reconcileDonation(donationId); } catch (e: any) { console.error('[BOT] reconcileDonation failed:', e?.message || e); }
   const d = await db.donation.findUnique({ where: { id: donationId }, include: { user: true } });
@@ -213,6 +217,9 @@ async function donationStatusReply(donationId: string): Promise<BotReply> {
     const lead = rec?.justPaid
       ? `Razorpay se aapka ₹${d.amount.toLocaleString('en-IN')} ka payment verify ho gaya hai. 🙏`
       : `Aapka ₹${d.amount.toLocaleString('en-IN')} ka donation verified hai. 🙏`;
+    if (channel === 'web') {
+      return { intent: 'DONATION_RECEIPT', text: `${lead}\nReference: ${d.reference}\nDhanyavaad! Aapki PDF receipt yahan se download karein:\n${env.API_URL}/api/donations/${d.id}/receipt` };
+    }
     return {
       intent: 'DONATION_RECEIPT',
       text: `${lead}\nReference: ${d.reference}\nDhanyavaad! PDF receipt bhej raha hoon.`,
@@ -236,7 +243,7 @@ async function donationStatusReply(donationId: string): Promise<BotReply> {
   return { intent: 'DONATION_STATUS', text: `Razorpay par donation ${ref} ka payment abhi tak receive nahi hua hai. Agar aapne abhi payment kiya hai to 1-2 minute baad "receipt" likhein. Payment na hua ho to naya link ke liye "Donation 500" jaise amount ke saath likhein. Dobara payment tabhi karein jab pehla payment fail dikhe.` };
 }
 
-async function orderStatusReply(orderId: string, wantsInvoice: boolean): Promise<BotReply> {
+async function orderStatusReply(orderId: string, wantsInvoice: boolean, channel: 'whatsapp' | 'web' = 'whatsapp'): Promise<BotReply> {
   let rec;
   try { rec = await reconcileOrder(orderId); } catch (e: any) { console.error('[BOT] reconcileOrder failed:', e?.message || e); }
   const o = await db.order.findUnique({ where: { id: orderId }, include: { user: true, items: { include: { product: true } } } });
@@ -257,10 +264,11 @@ async function orderStatusReply(orderId: string, wantsInvoice: boolean): Promise
   if (o.trackingUrl) lines.push(`Tracking: ${o.trackingUrl}`);
   if (!o.awb && ['CONFIRMED', 'PROCESSING'].includes(o.status)) lines.push('Dispatch hone par tracking details yahin share ki jayengi.');
   if (rec?.justPaid) lines.push('\nAapka payment abhi verify hua hai; confirmation aur invoice bheji ja rahi hai.');
+  if (channel === 'web' && wantsInvoice) lines.push(`Invoice: ${env.API_URL}/api/orders/${o.id}/invoice`);
   return {
     intent: 'ORDER_STATUS',
     text: lines.join('\n'),
-    after: wantsInvoice && !rec?.justPaid ? async () => { await sendOrderInvoice(o.id).catch(async (e) => { console.error('[BOT] Invoice send failed:', e?.message || e); await sendWhatsAppText(o.user.phone, `Invoice bhejne mein dikkat aayi. ${SUPPORT}`); }); } : undefined,
+    after: channel !== 'web' && wantsInvoice && !rec?.justPaid ? async () => { await sendOrderInvoice(o.id).catch(async (e) => { console.error('[BOT] Invoice send failed:', e?.message || e); await sendWhatsAppText(o.user.phone, `Invoice bhejne mein dikkat aayi. ${SUPPORT}`); }); } : undefined,
   };
 }
 
@@ -280,13 +288,13 @@ async function handleShop(ctx: Ctx, text: string): Promise<BotReply | null> {
       return {
         intent: 'SHOP', image,
         text: image
-          ? `${p.name} — ${money(p.price)} (${p.stock > 0 ? `${p.stock} available` : 'Out of stock'}). Order karne ke liye "${p.name} kharidna hai" likhein.`
-          : `${p.name} ki photo abhi available nahi hai. Price: ${money(p.price)} (${p.stock > 0 ? `${p.stock} available` : 'Out of stock'}). Order karne ke liye "${p.name} kharidna hai" likhein.`,
+          ? `${p.name} — ${money(p.price)}${stockNote(p)}.${p.stock > 0 ? ` Order karne ke liye "${p.name} kharidna hai" likhein.` : ''}`
+          : `${p.name} ki photo abhi available nahi hai. Price: ${money(p.price)}${stockNote(p)}.${p.stock > 0 ? ` Order karne ke liye "${p.name} kharidna hai" likhein.` : ''}`,
       };
     }
     if (hasBuyIntent(text)) return startCheckout(ctx, p, parseQuantity(text, spans.get(p.id)));
     if (hasPriceIntent(text)) {
-      return { intent: 'SHOP', image: productImage(p), text: `${p.name} — ${money(p.price)} (${p.stock > 0 ? `${p.stock} available` : 'Out of stock'}). Order karne ke liye "${p.name} kharidna hai" likhein.` };
+      return { intent: 'SHOP', image: productImage(p), text: `${p.name} — ${money(p.price)}${stockNote(p)}.${p.stock > 0 ? ` Order karne ke liye "${p.name} kharidna hai" likhein.` : ''}` };
     }
     // Just the product name on its own means "I want this".
     if (normalizeBare(text) === normalizeBare(p.name)) return startCheckout(ctx, p, 1);
@@ -310,7 +318,7 @@ async function startCheckout(ctx: Ctx, p: ProductRow, quantity: number, keep?: {
     return { intent: 'SHOP', text: `${p.name} abhi out of stock hai. Koi doosra product choose karein ya "products" likhein.` };
   }
   if (quantity > p.stock) {
-    return { intent: 'SHOP', text: `${p.name} ka sirf ${p.stock} stock available hai. Kripya ${p.stock} ya usse kam quantity bhejein, jaise "${p.stock} ${p.name}".` };
+    return { intent: 'SHOP', text: `${p.name} ki itni quantity abhi available nahi hai. Kripya kam quantity bhejein, jaise "1 ${p.name}".` };
   }
   const user = await db.user.findUnique({ where: { phone: ctx.phone } });
   if (!user?.name) {
@@ -400,7 +408,7 @@ async function handleState(ctx: Ctx, text: string, state: State): Promise<BotRep
 
       const qty = parseExplicitQuantity(text);
       if (qty != null) {
-        if (qty > stateProduct.stock) return { intent: 'SHOP', text: `${stateProduct.name} ka sirf ${stateProduct.stock} stock available hai.` };
+        if (qty > stateProduct.stock) return { intent: 'SHOP', text: `${stateProduct.name} ki itni quantity abhi available nahi hai. Kripya kam quantity bhejein.` };
         if (state.step === 'AWAIT_CONFIRM') {
           const u = await db.user.findUnique({ where: { phone: ctx.phone } });
           return confirmationReply(ctx, stateProduct, qty, u?.name || 'Customer', state.address, state.pin);

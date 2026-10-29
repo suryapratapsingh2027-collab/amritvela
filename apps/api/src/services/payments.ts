@@ -53,7 +53,8 @@ export async function deliverDonationReceipt(donationId: string): Promise<boolea
     return true;
   } catch (e: any) {
     console.error('[RECEIPT] Delivery failed for', d.reference, e?.message || e);
-    await db.donation.update({ where: { id: d.id }, data: { receiptSentAt: null } }).catch(() => undefined);
+    // Count the failure; the sweeper stops retrying after 5 attempts (e.g. website donors outside WhatsApp's 24h window).
+    await db.donation.update({ where: { id: d.id }, data: { receiptSentAt: null, receiptAttempts: { increment: 1 } } }).catch(() => undefined);
     return false;
   }
 }
@@ -154,7 +155,7 @@ export async function sweepPendingPayments(reason = 'interval'): Promise<{ donat
 
     // Receipts that were never delivered (e.g. WhatsApp outage when the webhook fired).
     const undelivered = await db.donation.findMany({
-      where: { paymentStatus: 'PAID', receiptSentAt: null, paidAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
+      where: { paymentStatus: 'PAID', receiptSentAt: null, receiptAttempts: { lt: 5 }, paidAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } },
       take: 25,
     });
     for (const d of undelivered) {

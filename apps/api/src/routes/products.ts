@@ -1,2 +1,13 @@
-import { Router } from 'express'; import { db } from '../db'; import { auth } from '../middleware/auth';
-const r=Router();r.get('/',async(_,res)=>res.json(await db.product.findMany({where:{active:true},orderBy:{createdAt:'desc'}})));r.post('/',auth,async(req,res)=>res.status(201).json(await db.product.create({data:req.body})));r.patch('/:id',auth,async(req,res)=>res.json(await db.product.update({where:{id:String(req.params.id)},data:req.body})));r.delete('/:id',auth,async(req,res)=>{await db.product.update({where:{id:String(req.params.id)},data:{active:false}});res.status(204).end()});export default r;
+import { Router } from 'express';
+import { db } from '../db';
+import { isSellable } from '../services/pricing';
+
+// Public catalogue (read-only). Creating/editing products happens only in the authenticated admin API (/api/admin/products).
+const r = Router();
+
+r.get('/', async (_req, res) => {
+  const rows = await db.product.findMany({ where: { active: true }, orderBy: { createdAt: 'desc' } });
+  res.json(rows.filter(isSellable).map((p) => ({ ...p, description: /^add product description$/i.test(p.description.trim()) ? '' : p.description })));
+});
+
+export default r;

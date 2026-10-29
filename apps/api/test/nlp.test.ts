@@ -51,4 +51,12 @@ t('greeting / yes / menu', () => { assert.equal(isGreeting('Hello'), true); asse
 t('name validation', () => { assert.equal(validateName('Haan').ok, false); assert.equal(validateName('Surya Pratap Singh').ok, true); assert.equal(validateName('464001').ok, false); });
 t('buy intent', () => { assert.equal(hasBuyIntent('Nariyal kharidna h'), true); assert.equal(hasBuyIntent('Nariyal order karna h'), true); assert.equal(hasBuyIntent('hello'), false); });
 t('track intent: order questions yes, Trust address question no', () => { assert.equal(hasTrackIntent('mera order kahan hai'), true); assert.equal(hasTrackIntent('order status'), true); assert.equal(hasTrackIntent('Trust ka address kahan hai'), false); assert.equal(hasTrackIntent('Trust ka ashram kahan hai'), false); });
+t('overlapping names: "Rudraksha Mala" beats "Mala"; plain "mala" still means Mala', () => {
+  const Q = [...P, { id: 'r', name: 'Rudraksha Mala' }];
+  assert.deepEqual(findProducts('Rudraksha Mala kharidna hai', Q).wanted.map((p) => p.name), ['Rudraksha Mala']);
+  assert.deepEqual(findProducts('rudraksha mala chahiye', Q).wanted.map((p) => p.name), ['Rudraksha Mala']);
+  assert.deepEqual(findProducts('mala chahiye', Q).wanted.map((p) => p.name), ['Mala']);
+  assert.deepEqual(findProducts('mala aur nariyal', Q).wanted.map((p) => p.name), ['Mala', 'Nariyal']);
+  assert.deepEqual(findProducts('rudraksha mala nahi, nariyal chahiye', Q).wanted.map((p) => p.name), ['Nariyal']);
+});
 console.log(`\n${n} tests passed`);

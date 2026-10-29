@@ -18,6 +18,7 @@ process.env.WHATSAPP_PHONE_NUMBER_ID = '123';
 process.env.WHATSAPP_APP_SECRET = 'appsecret';
 process.env.API_URL = 'https://api.example.test';
 process.env.RECONCILE_INTERVAL_MS = '0';
+process.env.JWT_SECRET = 'test-secret-test-secret-test-secret-1234';
 
 const testClient = require(process.env.E2E_CLIENT_DIR || '../.e2e-client');
 const { PrismaPg } = require('@prisma/adapter-pg');
@@ -30,6 +31,7 @@ const rzp = new Map<string, { state: 'paid' | 'unpaid' | 'expired'; amountPaidPa
 let linkSeq = 0;
 let failLinkCreation = false;
 let failImage = false;
+const WINDOW_CLOSED_PHONE = '919000000777';
 let awbFail = false;
 const shipCalls: any[] = [];
 let assignCalls = 0;
@@ -43,7 +45,7 @@ const origLoad = (Module as any)._load;
   const real = origLoad.apply(this, arguments);
   if (resolved.endsWith('/integrations/whatsapp.ts')) {
     return { ...real,
-      sendWhatsAppText: async (to: string, text: string) => { outbox.push({ to, kind: 'text', text }); return { ok: true }; },
+      sendWhatsAppText: async (to: string, text: string) => { if (to === WINDOW_CLOSED_PHONE) { const err: any = new Error('Request failed'); err.response = { data: { error: { code: 131047, message: 'Re-engagement message' } } }; throw err; } outbox.push({ to, kind: 'text', text }); return { ok: true }; },
       sendWhatsAppPdf: async (to: string, pdf: Buffer, filename: string) => { assert.ok(pdf.slice(0, 4).toString() === '%PDF', 'receipt must be a real PDF'); outbox.push({ to, kind: 'pdf', filename, bytes: pdf.length }); return { ok: true }; },
       sendWhatsAppImage: async (to: string, url: string, caption?: string) => { if (failImage) throw new Error('image rejected'); outbox.push({ to, kind: 'image', url, text: caption }); return { ok: true }; },
       sendWhatsAppDocument: async (to: string, _l: string, filename: string) => { outbox.push({ to, kind: 'doc', filename }); return { ok: true }; },
@@ -76,6 +78,7 @@ const origLoad = (Module as any)._load;
       return { id, short_url: `https://rzp.io/rzp/${id}`, amount: input.amount * 100 };
     };
     return { ...real,
+      createPayment: async (amount: number) => ({ id: `order_${++linkSeq}`, amount: amount * 100 }),
       createDonationPaymentLink: mk('plink'), createOrderPaymentLink: mk('plink'),
       fetchProviderPaymentState: async (id: string) => { const s = rzp.get(id); return s ? { state: s.state, paymentId: s.paymentId, amountPaidPaise: s.amountPaidPaise, currency: 'INR' } : { state: 'unknown', amountPaidPaise: 0 }; },
     };
@@ -85,6 +88,13 @@ const origLoad = (Module as any)._load;
 
 import express from 'express';
 const webhooks = require('../src/routes/webhooks').default;
+const authRouter = require('../src/routes/auth').default;
+const adminRouter = require('../src/routes/admin').default;
+const assistantRouter = require('../src/routes/assistant').default;
+const productsRouter = require('../src/routes/products').default;
+const ordersRouter = require('../src/routes/orders').default;
+const donationsRouter = require('../src/routes/donations').default;
+const bcrypt = require('bcryptjs');
 const payments = require('../src/services/payments');
 const fulfillment = require('../src/services/fulfillment');
 const { trustKnowledge } = require('../src/services/trust-knowledge');
@@ -92,6 +102,9 @@ const { trustKnowledge } = require('../src/services/trust-knowledge');
 const app = express();
 app.use(express.json({ verify: (req: any, _r, buf) => { req.rawBody = buf.toString(); } }));
 app.use('/webhooks', webhooks);
+app.use('/api/auth', authRouter); app.use('/api/admin', adminRouter); app.use('/api/assistant', assistantRouter);
+app.use('/api/products', productsRouter); app.use('/api/orders', ordersRouter); app.use('/api/donations', donationsRouter);
+app.use((err: any, _req: any, res: any, _next: any) => res.status(err?.status || 500).json({ error: err?.message }));
 let base = '';
 
 // ---- helpers
@@ -115,10 +128,15 @@ async function razorpayEvent(payload: any, opts: { badSig?: boolean } = {}) {
   const res = await fetch(`${base}/webhooks/razorpay`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-razorpay-signature': sig, 'x-razorpay-event-id': `evt_${++msgSeq}_${Date.now()}` }, body });
   return { status: res.status, sent: outbox.slice(from) };
 }
+async function http(method: string, path: string, opts: { body?: any; token?: string } = {}) {
+  const res = await fetch(`${base}${path}`, { method, headers: { 'Content-Type': 'application/json', ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}) }, body: opts.body === undefined ? undefined : JSON.stringify(opts.body) });
+  let json: any = null; try { json = await res.json(); } catch { /* 204 */ }
+  return { status: res.status, json };
+}
 let passed = 0;
 async function test(name: string, fn: () => Promise<void>) {
   try { await fn(); passed++; console.log('  ✔', name); }
-  catch (e: any) { console.error('  ✘', name, '\n     ', e?.message?.split('\n').slice(0, 6).join('\n      ')); process.exitCode = 1; }
+  catch (e: any) { console.error('  ✘', name, '\n     ', e?.message?.split('\n').slice(0, 6).join('\n      '), process.env.E2E_TRACE ? '\n' + e?.stack : ''); process.exitCode = 1; }
 }
 
 async function reset() {
@@ -182,7 +200,7 @@ async function reset() {
     assert.match(t, /Nariyal x 3/); assert.match(t, /Product price: ₹300/); assert.match(t, /Total: ₹380/); await wa(PHONE, 'cancel');
   });
   await test('quantity above stock refused (Gangajal stock 5)', async () => {
-    const t = texts(await wa(PHONE, '10 gangajal chahiye')); assert.match(t, /sirf 5 stock/);
+    const t = texts(await wa(PHONE, '10 gangajal chahiye')); assert.match(t, /itni quantity abhi available nahi/); assert.doesNotMatch(t, /\b5\b/);
   });
   await test('free shipping above ₹1000 (3 gangajal = ₹1200)', async () => {
     await wa(PHONE, '3 gangajal chahiye'); const t = texts(await wa(PHONE, ADDR));
@@ -423,14 +441,216 @@ async function reset() {
     await assert.rejects(() => fulfillment.shipOrder(o.id), /must be paid/);
   });
 
+
+  console.log('\nSTOCK IS NEVER SHOWN TO CUSTOMERS');
+  await reset();
+  await test('product list / price answers contain no stock numbers; out-of-stock products are hidden from the list', async () => {
+    await db.product.updateMany({ where: { name: 'Mala' }, data: { stock: 0 } });
+    const list = texts(await wa(PHONE, 'products dikhao'));
+    assert.match(list, /Nariyal — ₹100/); assert.doesNotMatch(list, /available|stock|\b40\b|\b50\b/i); assert.doesNotMatch(list, /Mala/);
+    await wa(PHONE, 'cancel');
+    const price = texts(await wa(PHONE, 'Nariyal kitne ka hai')); assert.doesNotMatch(price, /available|stock|\b40\b/i);
+    assert.match(texts(await wa(PHONE, 'Mala kitne ka hai')), /abhi stock mein nahi hai/);
+    assert.match(texts(await wa(PHONE, 'Mala kharidna hai')), /out of stock/i);
+  });
+
+  console.log('\nADMIN AUTH (show-password UI is client side; API: login, forgot, reset, change email/password)');
+  await reset();
+  const ADMIN_PW = 'Old-password-123';
+  await db.adminUser.deleteMany();
+  const admin = await db.adminUser.create({ data: { email: 'owner@trust.org', passwordHash: await bcrypt.hash(ADMIN_PW, 10), role: 'ADMIN' } });
+  let token = '';
+  await test('wrong password -> 401, unknown email -> 401, right password -> token', async () => {
+    assert.equal((await http('POST', '/api/auth/login', { body: { email: 'owner@trust.org', password: 'nope' } })).status, 401);
+    assert.equal((await http('POST', '/api/auth/login', { body: { email: 'ghost@trust.org', password: ADMIN_PW } })).status, 401);
+    const ok = await http('POST', '/api/auth/login', { body: { email: 'OWNER@trust.org', password: ADMIN_PW } }); assert.equal(ok.status, 200); token = ok.json.token; assert.ok(token);
+  });
+  await test('admin API requires a token', async () => { assert.equal((await http('GET', '/api/admin/products')).status, 401); assert.equal((await http('GET', '/api/admin/products', { token })).status, 200); });
+  await test('login is rate limited after 10 bad attempts', async () => {
+    let last = 0; for (let i = 0; i < 12; i++) last = (await http('POST', '/api/auth/login', { body: { email: 'victim@trust.org', password: 'x' + i } })).status; assert.equal(last, 429);
+  });
+  let resetToken = '';
+  await test('forgot-password: same answer for unknown and known emails; known email gets a one-time link (logged when SMTP is off)', async () => {
+    const logs: string[] = []; const origWarn = console.warn; console.warn = (...a: any[]) => { logs.push(a.join(' ')); };
+    const unknown = await http('POST', '/api/auth/forgot-password', { body: { email: 'ghost@trust.org' } });
+    const known = await http('POST', '/api/auth/forgot-password', { body: { email: 'owner@trust.org' } });
+    console.warn = origWarn;
+    assert.equal(unknown.status, 200); assert.equal(known.status, 200); assert.deepEqual(unknown.json, known.json);
+    const line = logs.find((l) => l.includes('reset-password?token=')); assert.ok(line, 'reset link must be available');
+    resetToken = line!.match(/token=([a-f0-9]+)/)![1]; assert.equal(await db.passwordReset.count(), 1);
+    const row = await db.passwordReset.findFirstOrThrow(); assert.notEqual(row.tokenHash, resetToken, 'only a hash is stored');
+  });
+  await test('reset-password: weak password rejected, garbage token rejected, valid reset works once and revokes old sessions', async () => {
+    assert.equal((await http('POST', '/api/auth/reset-password', { body: { token: resetToken, password: 'short1' } })).status, 400);
+    assert.equal((await http('POST', '/api/auth/reset-password', { body: { token: 'f'.repeat(64), password: 'Brand-new-pass-9' } })).status, 400);
+    const ok = await http('POST', '/api/auth/reset-password', { body: { token: resetToken, password: 'Brand-new-pass-9' } }); assert.equal(ok.status, 200);
+    assert.equal((await http('POST', '/api/auth/reset-password', { body: { token: resetToken, password: 'Another-pass-99' } })).status, 400, 'token is single use');
+    assert.equal((await http('GET', '/api/admin/products', { token })).status, 401, 'old JWT must stop working');
+    const login = await http('POST', '/api/auth/login', { body: { email: 'owner@trust.org', password: 'Brand-new-pass-9' } }); assert.equal(login.status, 200); token = login.json.token;
+  });
+  await test('expired reset token is rejected', async () => {
+    const crypto2 = require('crypto'); const raw = 'a'.repeat(64);
+    await db.passwordReset.create({ data: { adminId: admin.id, tokenHash: crypto2.createHash('sha256').update(raw).digest('hex'), expiresAt: new Date(Date.now() - 1000) } });
+    assert.equal((await http('POST', '/api/auth/reset-password', { body: { token: raw, password: 'Brand-new-pass-77' } })).status, 400);
+  });
+  await test('change-password: needs the current password, enforces rules, keeps this session, kills others', async () => {
+    assert.equal((await http('POST', '/api/auth/change-password', { token, body: { currentPassword: 'wrong', newPassword: 'Third-pass-12345' } })).status, 400);
+    assert.equal((await http('POST', '/api/auth/change-password', { token, body: { currentPassword: 'Brand-new-pass-9', newPassword: 'allletters' } })).status, 400);
+    const oldToken = token; const ok = await http('POST', '/api/auth/change-password', { token, body: { currentPassword: 'Brand-new-pass-9', newPassword: 'Third-pass-12345' } });
+    assert.equal(ok.status, 200); token = ok.json.token;
+    assert.equal((await http('GET', '/api/admin/products', { token: oldToken })).status, 401); assert.equal((await http('GET', '/api/admin/products', { token })).status, 200);
+  });
+  await test('change-email: needs password, rejects duplicates, new email logs in', async () => {
+    await db.adminUser.create({ data: { email: 'staff@trust.org', passwordHash: 'x', role: 'STAFF' } });
+    assert.equal((await http('POST', '/api/auth/change-email', { token, body: { currentPassword: 'bad', newEmail: 'new@trust.org' } })).status, 400);
+    assert.equal((await http('POST', '/api/auth/change-email', { token, body: { currentPassword: 'Third-pass-12345', newEmail: 'STAFF@trust.org' } })).status, 409);
+    assert.equal((await http('POST', '/api/auth/change-email', { token, body: { currentPassword: 'Third-pass-12345', newEmail: 'not-an-email' } })).status, 400);
+    const ok = await http('POST', '/api/auth/change-email', { token, body: { currentPassword: 'Third-pass-12345', newEmail: 'New.Owner@Trust.org' } }); assert.equal(ok.status, 200); assert.equal(ok.json.user.email, 'new.owner@trust.org');
+    assert.equal((await http('POST', '/api/auth/login', { body: { email: 'new.owner@trust.org', password: 'Third-pass-12345' } })).status, 200);
+    assert.equal((await http('POST', '/api/auth/login', { body: { email: 'owner@trust.org', password: 'Third-pass-12345' } })).status, 401);
+  });
+
+  console.log('\nADMIN PRODUCTS (validated form, images)');
+  await reset();
+  const img = 'https://res.cloudinary.com/demo/image/upload/v1/amrit-vela-trust/p.jpg';
+  await test('create product: slug generated, fields stored, unknown/dangerous fields ignored', async () => {
+    const r = await http('POST', '/api/admin/products', { token, body: { name: '  Rudraksha Mala ', description: 'Original 108 beads', price: '250', stock: 12, category: 'Mala', imageUrl: img, slug: 'hacked', id: 'evil', createdAt: '2000-01-01' } });
+    assert.equal(r.status, 201); assert.equal(r.json.slug, 'rudraksha-mala'); assert.equal(r.json.price, 250); assert.equal(r.json.name, 'Rudraksha Mala'); assert.equal(r.json.imageUrl, img); assert.notEqual(r.json.id, 'evil');
+  });
+  await test('validation messages are specific (price/stock/name/image)', async () => {
+    const bad = async (body: any, re: RegExp) => { const r = await http('POST', '/api/admin/products', { token, body }); assert.equal(r.status, 400, JSON.stringify(body)); assert.match(r.json.error, re); };
+    await bad({ name: 'A', price: 10, stock: 1 }, /naam/i); await bad({ name: 'Valid', price: 0, stock: 1 }, /Price/); await bad({ name: 'Valid', price: 10.5, stock: 1 }, /poore rupaye/);
+    await bad({ name: 'Valid', price: 10, stock: -1 }, /negative/); await bad({ name: 'Valid', price: 10, stock: 'abc' }, /Stock/); await bad({ name: 'Valid', price: 10, stock: 1, imageUrl: 'http://x/y.jpg' }, /https/);
+  });
+  await test('duplicate live product name rejected; duplicate slug auto-suffixed for a hidden one', async () => {
+    assert.equal((await http('POST', '/api/admin/products', { token, body: { name: 'rudraksha mala', price: 5, stock: 1 } })).status, 409);
+    const first = (await db.product.findFirstOrThrow({ where: { slug: 'rudraksha-mala' } }));
+    await http('DELETE', `/api/admin/products/${first.id}`, { token });
+    const again = await http('POST', '/api/admin/products', { token, body: { name: 'Rudraksha Mala', price: 5, stock: 1 } }); assert.equal(again.status, 201); assert.equal(again.json.slug, 'rudraksha-mala-2');
+  });
+  await test('partial update (stock only) keeps everything else; blanking the image removes it', async () => {
+    const p = await db.product.findFirstOrThrow({ where: { slug: 'rudraksha-mala-2' } });
+    const r1 = await http('PATCH', `/api/admin/products/${p.id}`, { token, body: { stock: 7, imageUrl: img } }); assert.equal(r1.json.stock, 7); assert.equal(r1.json.name, 'Rudraksha Mala');
+    const r2 = await http('PATCH', `/api/admin/products/${p.id}`, { token, body: { imageUrl: '' } }); assert.equal(r2.json.imageUrl, null);
+    assert.equal((await http('PATCH', `/api/admin/products/${p.id}`, { token, body: { price: -5 } })).status, 400);
+    assert.equal((await http('PATCH', `/api/admin/products/nope`, { token, body: { stock: 1 } })).status, 404);
+  });
+  await test('public catalogue hides hidden / ₹0 / placeholder rows and cleans placeholder descriptions', async () => {
+    const list = (await http('GET', '/api/products')).json; const names = list.map((p: any) => p.name);
+    assert.ok(names.includes('Nariyal')); assert.ok(!names.includes('New Product')); assert.ok(!names.includes('Trust Cotton Bag'));
+    assert.equal(list.find((p: any) => p.name === 'Nariyal').description, '');
+    assert.equal((await http('POST', '/api/products', { body: { name: 'x' } })).status, 404, 'public write endpoints are gone');
+  });
+  await test('new product is immediately orderable on WhatsApp with its photo', async () => {
+    const p = await db.product.findFirstOrThrow({ where: { slug: 'rudraksha-mala-2' } });
+    assert.equal((await http('PATCH', `/api/admin/products/${p.id}`, { token, body: { imageUrl: img, price: 250 } })).status, 200);
+    const sent = await wa(PHONE, 'Rudraksha Mala kharidna hai'); assert.ok(sent.some((m) => m.kind === 'image' && m.url!.includes('f_jpg')), 'admin-uploaded photo must reach WhatsApp'); assert.match(texts(sent), /Rudraksha Mala x 1 — ₹250/);
+    await wa(PHONE, 'cancel');
+  });
+
+  await test('image upload endpoint: needs auth, rejects non-images, explains missing Cloudinary config', async () => {
+    assert.equal((await http('POST', '/api/admin/media/upload', { body: { dataUrl: 'data:image/jpeg;base64,AAAA' } })).status, 401);
+    const bad = await http('POST', '/api/admin/media/upload', { token, body: { dataUrl: 'data:text/html;base64,AAAA' } }); assert.equal(bad.status, 400); assert.match(bad.json.error, /PNG, JPG/);
+    delete process.env.CLOUDINARY_CLOUD_NAME;
+    const noCfg = await http('POST', '/api/admin/media/upload', { token, body: { dataUrl: 'data:image/jpeg;base64,AAAA' } }); assert.equal(noCfg.status, 503); assert.match(noCfg.json.error, /CLOUDINARY/);
+  });
+  await test('knowledge edit through the panel drops the auto-update marker so bootstrap never overwrites it', async () => {
+    const doc = await db.knowledgeDocument.create({ data: { title: 'Trust FAQ & Policies', content: 'KB_VERSION:1\n\n## A\nold text' } });
+    const r = await http('PATCH', `/api/admin/knowledge/${doc.id}`, { token, body: { content: 'KB_VERSION:1\n\n## A\nedited by admin' } });
+    assert.equal(r.status, 200); assert.doesNotMatch(r.json.content, /KB_VERSION/); assert.match(r.json.content, /edited by admin/);
+    assert.equal((await http('PATCH', `/api/admin/knowledge/${doc.id}`, { token, body: { content: 'x' } })).status, 400);
+    await db.knowledgeDocument.delete({ where: { id: doc.id } });
+  });
+
+  console.log('\nSUPPORT INBOX (admin reply was a missing route -> 404)');
+  await reset();
+  const adminToken = token;
+  await test('human handover -> admin lists the chat, sees messages, replies; reply reaches the customer on WhatsApp', async () => {
+    await wa(PHONE, 'mujhe kisi insaan se baat karni hai');
+    const list = await http('GET', '/api/admin/conversations', { token: adminToken }); assert.equal(list.status, 200); const c = list.json[0];
+    assert.equal(c.mode, 'HUMAN'); assert.equal(c.channel, 'WHATSAPP'); assert.equal(c.awaitingReply, false); assert.ok(c.user.phone === PHONE);
+    await wa(PHONE, 'mera order nahi aaya'); assert.equal((await http('GET', '/api/admin/conversations', { token: adminToken })).json[0].awaitingReply, true);
+    const thread = await http('GET', `/api/admin/conversations/${c.id}/messages`, { token: adminToken }); assert.ok(thread.json.messages.length >= 3);
+    outbox.length = 0; const reply = await http('POST', `/api/admin/conversations/${c.id}/reply`, { token: adminToken, body: { text: 'Namaste, hum check kar rahe hain.' } });
+    assert.equal(reply.status, 201); assert.equal(reply.json.delivered, 'whatsapp'); assert.equal(outbox.length, 1); assert.equal(outbox[0].to, PHONE); assert.match(outbox[0].text!, /check kar rahe/);
+    assert.equal((await http('GET', '/api/admin/conversations', { token: adminToken })).json[0].awaitingReply, false);
+  });
+  await test('reply validation: empty text, unknown conversation, unauthenticated', async () => {
+    const c = (await http('GET', '/api/admin/conversations', { token: adminToken })).json[0];
+    assert.equal((await http('POST', `/api/admin/conversations/${c.id}/reply`, { token: adminToken, body: { text: '   ' } })).status, 400);
+    assert.equal((await http('POST', `/api/admin/conversations/nope/reply`, { token: adminToken, body: { text: 'hi' } })).status, 404);
+    assert.equal((await http('POST', `/api/admin/conversations/${c.id}/reply`, { body: { text: 'hi' } })).status, 401);
+  });
+  await test('WhatsApp 24h window closed -> clear 409 message, nothing saved as sent', async () => {
+    const u = await db.user.create({ data: { phone: WINDOW_CLOSED_PHONE } }); const conv = await db.conversation.create({ data: { userId: u.id, mode: 'HUMAN' } });
+    const r = await http('POST', `/api/admin/conversations/${conv.id}/reply`, { token: adminToken, body: { text: 'hello' } });
+    assert.equal(r.status, 409, JSON.stringify(r)); assert.match(String(r.json?.error), /24 ghante/, JSON.stringify(r)); assert.equal(await db.message.count({ where: { conversationId: conv.id } }), 0);
+  });
+  await test('"Return to AI" closes the open ticket and the bot answers again', async () => {
+    const c = (await http('GET', '/api/admin/conversations', { token: adminToken })).json.find((x: any) => x.user.phone === PHONE);
+    assert.equal((await http('PATCH', `/api/admin/conversations/${c.id}`, { token: adminToken, body: { mode: 'BANANA' } })).status, 400);
+    assert.equal((await http('PATCH', `/api/admin/conversations/${c.id}`, { token: adminToken, body: { mode: 'AI' } })).status, 200);
+    assert.equal(await db.supportTicket.count({ where: { status: 'OPEN' } }), 0); assert.match(texts(await wa(PHONE, 'hello')), /swagat/);
+  });
+
+  console.log('\nWEBSITE ASSISTANT (client complaint: "order id maang raha hai")');
+  await reset();
+  let webConv = '';
+  const web = async (message: string, extra: any = {}) => { const r = await http('POST', '/api/assistant', { body: { phone: '98765 00001', name: 'Surya', message, conversationId: webConv || undefined, ...extra } }); if (r.json?.conversationId) webConv = r.json.conversationId; return r; };
+  await test('website visitor can order a product end-to-end; bot never asks for an order id', async () => {
+    const a = await web('Nariyal kharidna hai'); assert.equal(a.status, 200); assert.match(a.json.text, /PIN code/); assert.doesNotMatch(a.json.text, /order id|order number/i); assert.ok(a.json.image === null || a.json.image === undefined);
+    const b = await web('Chanakya path neemtal vidisha madhya pradesh 464001'); assert.match(b.json.text, /Total: ₹180/);
+    const c = await web('haan'); assert.match(c.json.text, /Payment link: https:\/\/rzp\.io/);
+    const o = await db.order.findFirstOrThrow({ include: { user: true } }); assert.equal(o.user.phone, '919876500001', 'phone normalised to the WhatsApp identity');
+    assert.equal((await db.conversation.findFirstOrThrow({ where: { channel: 'WEB' } })).channel, 'WEB');
+  });
+  await test('website chat shares the customer identity with WhatsApp but keeps its own conversation + state', async () => {
+    assert.equal(await db.user.count({ where: { phone: '919876500001' } }), 1); assert.equal(await db.conversation.count(), 1);
+    await wa('919876500001', 'Hello'); assert.equal(await db.conversation.count(), 2);
+  });
+  await test('website donation: link in chat; after Razorpay says paid, "receipt" returns a download link (no WhatsApp window needed)', async () => {
+    const d = await web('Donation 300'); assert.match(d.json.text, /₹300/); assert.match(d.json.text, /rzp\.io/);
+    const don = await db.donation.findFirstOrThrow(); rzp.set(don.razorpayOrderId!, { state: 'paid', amountPaidPaise: 30000, paymentId: 'pay_WEB' });
+    outbox.length = 0; const rec = await web('receipt'); assert.match(rec.json.text, /api\.example\.test\/api\/donations\/.*\/receipt/); assert.equal(outbox.filter((m) => m.kind === 'pdf').length, 0, 'no WhatsApp PDF for web chat');
+  });
+  await test('product photo is returned for the widget to render', async () => {
+    await db.product.updateMany({ where: { name: 'Nariyal' }, data: { imageUrl: 'https://res.cloudinary.com/demo/image/upload/v1/x/n.png' } });
+    const r = await web('Nariyal kitne ka hai'); assert.match(r.json.image.url, /f_jpg/); assert.match(r.json.text, /₹100/); assert.doesNotMatch(r.json.text, /available|\b40\b/);
+  });
+  await test('input validation: bad phone, empty/too long message, rate limit', async () => {
+    assert.equal((await http('POST', '/api/assistant', { body: { phone: '12345', message: 'hi' } })).status, 400);
+    assert.equal((await http('POST', '/api/assistant', { body: { phone: '9876500001', message: '' } })).status, 400);
+    assert.equal((await http('POST', '/api/assistant', { body: { phone: '9876500001', message: 'x'.repeat(1001) } })).status, 400);
+  });
+  await test('human handover on web: bot goes quiet, admin reply shows up via poll, "menu" returns to the bot', async () => {
+    const h = await web('mujhe kisi insaan se baat karni hai'); assert.equal(h.json.mode, 'HUMAN'); const since = new Date().toISOString();
+    const held = await web('koi hai?'); assert.equal(held.json.held, true); assert.equal(held.json.text, '');
+    const adminList = (await http('GET', '/api/admin/conversations', { token: adminToken })).json; const webC = adminList.find((c: any) => c.channel === 'WEB'); assert.ok(webC);
+    outbox.length = 0; const rep = await http('POST', `/api/admin/conversations/${webC.id}/reply`, { token: adminToken, body: { text: 'Namaste, main yahan hoon.' } }); assert.equal(rep.status, 201); assert.equal(rep.json.delivered, 'website'); assert.equal(outbox.length, 0, 'web replies are not sent to WhatsApp');
+    const poll = await http('GET', `/api/assistant/poll?conversationId=${webConv}&since=${encodeURIComponent(since)}`); assert.equal(poll.json.messages.length, 1); assert.match(poll.json.messages[0].text, /main yahan hoon/);
+    const hist = await http('GET', `/api/assistant/history?conversationId=${webConv}`); assert.ok(hist.json.messages.some((m: any) => m.byAdmin));
+    assert.match((await web('menu')).json.text, /swagat/);
+  });
+  await test('website checkout API: phone normalised, PIN required, stock message hides numbers', async () => {
+    const prod = await db.product.findFirstOrThrow({ where: { name: 'Nariyal' } });
+    const bad = await http('POST', '/api/orders', { body: { phone: '123', name: 'A B', address: 'x'.repeat(20) + ' 464001', items: [{ productId: prod.id, quantity: 1 }] } }); assert.equal(bad.status, 400);
+    const noPin = await http('POST', '/api/orders', { body: { phone: '9876500055', name: 'Ram Kumar', address: 'Gandhi road, near temple, Vidisha', items: [{ productId: prod.id, quantity: 1 }] } }); assert.equal(noPin.status, 400); assert.match(noPin.json.error, /PIN/);
+    const tooMany = await http('POST', '/api/orders', { body: { phone: '9876500055', name: 'Ram Kumar', address: 'Gandhi road, near temple, Vidisha 464001', items: [{ productId: prod.id, quantity: 999 }] } }); assert.equal(tooMany.status, 400); assert.doesNotMatch(tooMany.json.error, /\b40\b/);
+    const ok = await http('POST', '/api/orders', { body: { phone: '+91 98765 00055', name: 'Ram Kumar', address: 'Gandhi road, near temple, Vidisha 464001', items: [{ productId: prod.id, quantity: 2 }] } }); assert.equal(ok.status, 201, JSON.stringify(ok.json));
+    assert.equal(ok.json.order.total, 280); assert.equal((await db.user.findFirstOrThrow({ where: { phone: '919876500055' } })).name, 'Ram Kumar');
+  });
+
   console.log('\nBOOTSTRAP KNOWLEDGE LOADER');
   await test('placeholder knowledge doc is replaced with the verified Trust knowledge on boot', async () => {
-    process.env.ADMIN_EMAIL = 'a@b.co'; process.env.ADMIN_PASSWORD = 'password-12345';
+    process.env.ADMIN_EMAIL = 'env-admin@b.co'; process.env.ADMIN_PASSWORD = 'password-12345';
+    const adminsBefore = await db.adminUser.count();
     await reset(); await db.knowledgeDocument.deleteMany();
     await db.knowledgeDocument.create({ data: { title: 'Trust FAQ & Policies', content: 'Add the Trust-approved mission, contact details, donation policy...' } });
     delete require.cache[require.resolve('../src/bootstrap')]; require('../src/bootstrap');
     await new Promise((r) => setTimeout(r, 1500));
     const doc = await db.knowledgeDocument.findFirstOrThrow({ where: { title: 'Trust FAQ & Policies' } }); assert.match(doc.content, /KB_VERSION:2/); assert.match(doc.content, /Ulhasnagar-4/);
+    assert.equal(await db.adminUser.count(), adminsBefore, 'bootstrap must not create a second admin or reset an existing one');
+    assert.equal((await http('POST', '/api/auth/login', { body: { email: 'new.owner@trust.org', password: 'Third-pass-12345' } })).status, 200, 'panel-changed credentials survive a restart');
   });
 
   console.log(`\n${passed} e2e checks passed${process.exitCode ? ' — WITH FAILURES' : ''}`);

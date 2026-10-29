@@ -52,7 +52,7 @@ async function call<T = any>(method: 'get' | 'post', path: string, data?: unknow
  * preferring a verified address. Exported for unit tests.
  */
 export function extractPickupLocation(res: any): string | null {
-  const candidates = [res?.data?.shipping_address, res?.shipping_address, res?.data?.pickup_addresses, res?.data?.data?.shipping_address, res?.data, res];
+  const candidates = [res?.data?.shipping_address, res?.data?.data, res?.shipping_address, res?.data?.pickup_addresses, res?.data?.data?.shipping_address, res?.data, res];
   const list: any[] = (candidates.find((c) => Array.isArray(c) && c.length) as any[]) || [];
   const named = list.filter((x) => x && typeof (x.pickup_location ?? x.nickname) === 'string' && String(x.pickup_location ?? x.nickname).trim());
   if (!named.length) return null;
@@ -75,7 +75,17 @@ export async function getPickupLocation(): Promise<string> {
 
 export async function createShipment(payload: any) {
   if (env.MOCK_PROVIDERS) return { order_id: `mock_${Date.now()}`, shipment_id: `mock_s_${Date.now()}`, awb_code: `MOCK${Date.now()}`, courier_name: 'Mock Courier' };
-  return call('post', '/orders/create/adhoc', payload);
+  const res: any = await call('post', '/orders/create/adhoc', payload);
+  // Shiprocket answers HTTP 200 with "Wrong Pickup location entered" plus the valid list when the configured
+  // name does not match exactly. Self-heal once with the verified location it gave us.
+  if (/wrong pickup location/i.test(String(res?.message || ''))) {
+    const valid = extractPickupLocation(res);
+    if (valid && valid !== payload.pickup_location) {
+      console.warn(`[SHIPROCKET] Pickup location "${payload.pickup_location}" rejected; retrying with "${valid}". Set SHIPROCKET_PICKUP_LOCATION=${valid} to avoid this.`);
+      return call('post', '/orders/create/adhoc', { ...payload, pickup_location: valid });
+    }
+  }
+  return res;
 }
 
 /** Assigns the best available courier and returns the AWB. Needs wallet balance and a serviceable route. */

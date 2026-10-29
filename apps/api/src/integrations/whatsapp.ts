@@ -211,3 +211,15 @@ export async function sendWhatsAppImage(to: string, imageUrl: string, caption?: 
     throw error;
   }
 }
+
+/** Extracts a human-readable reason + Meta error code from a failed WhatsApp send. */
+export function whatsappErrorInfo(error: any): { code?: number; message: string; windowClosed: boolean } {
+  const e = error?.response?.data?.error;
+  const code = typeof e?.code === 'number' ? e.code : undefined;
+  const message = String(e?.error_data?.details || e?.message || error?.message || 'WhatsApp send failed');
+  // 131047 = more than 24h since the customer's last message (free-form messages not allowed)
+  const windowClosed = code === 131047 || /re-?engagement|24 hours|24-hour/i.test(message);
+  return { code, message, windowClosed };
+}
+
+export function whatsappLive(): boolean { return !isMockMode(); }

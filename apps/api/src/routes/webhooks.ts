@@ -8,6 +8,7 @@ import { sendWhatsAppImage, sendWhatsAppText } from '../integrations/whatsapp';
 import { markOrderPaid } from '../services/fulfillment';
 import { answer, knowledge } from '../services/ai';
 import { routeWhatsAppMessage, type BotReply } from '../services/whatsapp-bot';
+import { openSupportTicket } from '../services/support';
 import { deliverDonationReceipt, markDonationPaid, sweepPendingPayments } from '../services/payments';
 
 const r = Router();
@@ -54,19 +55,18 @@ async function saveOut(conversationId: string, text: string, intent: string, wha
   await db.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date() } });
 }
 
-async function openSupportTicket(conversationId: string, subject: string) {
-  await db.conversation.update({ where: { id: conversationId }, data: { mode: 'HUMAN' } });
-  const existing = await db.supportTicket.findFirst({ where: { conversationId, status: 'OPEN' } });
-  if (!existing) await db.supportTicket.create({ data: { conversationId, subject } });
-}
-
 async function processIncoming(phone: string, text: string, whatsappMessageId: string): Promise<void> {
   const user = await db.user.upsert({ where: { phone }, update: {}, create: { phone } });
-  let conversation = await db.conversation.findFirst({ where: { userId: user.id }, orderBy: { lastMessageAt: 'desc' } });
+  let conversation = await db.conversation.findFirst({ where: { userId: user.id, channel: 'WHATSAPP' }, orderBy: { lastMessageAt: 'desc' } });
   if (!conversation) conversation = await db.conversation.create({ data: { userId: user.id } });
 
   await db.message.create({ data: { conversationId: conversation.id, direction: 'IN', text, metadata: { whatsappMessageId } } });
   await db.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
+
+  if (conversation.mode === 'CLOSED') {
+    await db.conversation.update({ where: { id: conversation.id }, data: { mode: 'AI' } });
+    conversation = { ...conversation, mode: 'AI' };
+  }
 
   // A human agent owns this chat: do not talk over them. The customer can hand the chat back with "menu".
   if (conversation.mode === 'HUMAN') {

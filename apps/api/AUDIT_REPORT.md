@@ -61,3 +61,29 @@ Tests: 35 + 22 unit, 55 end-to-end checks pass. Not verified live: Shiprocket's 
 
 ## Hotfix: "No pickup address found in Shiprocket"
 Shiprocket returned no pickup address for the API login. Pickup parsing now handles every known response shape and prefers a verified address; if it is still empty the error shows Shiprocket's raw response. Fastest fix: set `SHIPROCKET_PICKUP_LOCATION` to the exact "Pickup Location" name from Shiprocket > Settings > Pickup Addresses.
+
+---
+# Round 3 (2026-10-28): admin panel, auth, images, support inbox, website chat
+
+| # | Request / finding | Root cause | Fix |
+|---|---|---|---|
+| 1 | Show password on login | n/a | Eye toggle (`PasswordInput`) on login, reset, change-password. Default credentials no longer pre-filled in the login form. |
+| 2 | Forgot password / change email | Missing | `/forgot-password` + `/reset-password` pages; API: one-time 30-min token (only its hash is stored), identical response for known/unknown emails, rate limited. Admin → **Account** tab: change email and password (current password required). Password change/reset revokes all other sessions (`tokenVersion`). |
+| 2b | **Hidden bug**: bootstrap reset the admin password to `ADMIN_PASSWORD` at every restart and re-created the old email | Upsert on every boot | First admin only created if none exists. Emergency recovery: `ADMIN_RESET_ON_BOOT=true` for one deploy. |
+| 3 | Product image upload | Missing (product `imageUrl` could only be typed) | Admin product form uploads a photo (Cloudinary), auto-cropped in the browser to **1000×1000 square** so every product looks identical on website/cart/WhatsApp (WhatsApp gets a JPEG via Cloudinary transform). Website grid uses a fixed 1:1 frame. Needs `CLOUDINARY_CLOUD_NAME` + `CLOUDINARY_UPLOAD_PRESET` (the API tells the admin if missing). |
+| 4 | Product form unclear | One-line inline inputs, no labels, "+ Add" created a ₹0 "New Product" row | Real form: labelled fields with help text (name/price/stock/category/description/photo/visible), inline validation, server validation with specific messages, duplicate-name protection (the bot finds products by name), slug auto-generated, placeholder rows no longer created. Public catalogue hides ₹0/placeholder rows. API no longer stores raw `req.body`. |
+| 5 | Support: admin cannot send | **`POST /api/admin/conversations/:id/reply` did not exist (404)** | Implemented. New Support inbox: list with channel/mode/"needs reply", live thread (auto-refresh), Enter-to-send, real error reasons (e.g. WhatsApp 24-hour window), take over / return to bot. Replying automatically takes over so the bot never talks over the agent. |
+| 6 | Stock numbers shown on WhatsApp | Bot/AI printed "40 available" | Customers never see quantities: out-of-stock products are hidden from the list, a direct ask gets "abhi stock mein nahi hai". Website shows "In stock / Out of stock". AI prompt forbids revealing quantities. |
+| 7 | Website assistant asks for an order id | `/api/assistant` used the plain AI, not the order/donation bot | Website chat now uses the same deterministic bot (order, donation, receipt, status) with name + mobile captured once, product photos, clickable payment links, admin replies delivered into the widget, history restore, rate limits. |
+| 8 | Other findings | Overlapping names ("Mala" vs "Rudraksha Mala") confused the bot; website/donation/order forms stored raw phone (`9876543210` ≠ WhatsApp `919876543210` → duplicate customers); cart "Pay" silently did nothing on empty fields and showed developer text; API errors showed raw JSON; shop page showed scaffold text; CORS broke if `WEB_URL` had a trailing slash; knowledge docs edited in the panel could be overwritten by auto-updates; receipts retried forever for website donors | Longest-name match wins; phone normalised everywhere (`utils/phone.ts`); cart/donate validation + messages; `ApiError` shows the sentence; scaffold removed; CORS normalised; editing a knowledge doc drops its auto-update marker; receipt retries capped at 5. |
+
+New env vars (all optional): `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_SECURE` (password-reset emails; without them the reset link is printed in the API log), `ADMIN_RESET_ON_BOOT`.
+New migration `20261028100000_admin_auth_web_chat` (adds columns/table only).
+
+Verification: API `tsc` + build clean; 36 + 23 unit and **83 end-to-end checks** against real Postgres (auth flows, validation, reply route, web chat, regressions); web `next build` clean; **15 component tests** (show-password, product form, inbox reply + error display, account settings, website chat).
+Not verified: live Cloudinary upload and in-browser canvas cropping (no browser/Cloudinary here), real SMTP delivery, Shiprocket/Razorpay/WhatsApp live calls. Do one real photo upload, one password-reset email and one admin reply in staging.
+
+## Hotfix (round 3.1): build errors on a monorepo install
+- `required_error` is not a valid option in zod 4 (a monorepo can hoist zod 4 even though this app declares ^3). The code no longer uses version-specific options; verified with zod 3.25 and 4.6 (83 end-to-end checks each).
+- `@types/express`, `@types/cors`, `@types/jsonwebtoken`, `@types/pdfkit`, `typescript`, `prisma` moved to `dependencies` so a production-style install (`NODE_ENV=production`, Render) can still run `npm run build`.
+- Run `npm install` at the monorepo root. Do not run `npm i @prisma/client@latest` (it can jump major versions).

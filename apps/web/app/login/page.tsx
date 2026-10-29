@@ -1,2 +1,45 @@
-'use client';import {useState} from 'react';import {useRouter} from 'next/navigation';import {api} from '../../lib/api';
-export default function Login(){const [email,setEmail]=useState('admin@example.com'),[password,setPassword]=useState('change-me'),[err,setErr]=useState(''),[loading,setLoading]=useState(false),router=useRouter();async function go(e:any){e.preventDefault();setLoading(true);setErr('');try{const x:any=await api('/api/auth/login',{method:'POST',body:JSON.stringify({email,password})});localStorage.setItem('trust_token',x.token);router.push('/admin')}catch(e:any){setErr(e.message.includes('Invalid')?'Invalid credentials':'API unavailable. Start the backend and check NEXT_PUBLIC_API_URL.')}finally{setLoading(false)}}return <main className="min-h-screen grid place-items-center grid-bg px-5"><form onSubmit={go} className="w-full max-w-md rounded-[32px] border bg-white p-8 shadow-soft"><div className="font-extrabold">TRUST<span className="text-neutral-400">CONNECT</span></div><h1 className="mt-10 text-3xl font-extrabold">Admin sign in</h1><p className="mt-2 text-neutral-500">Use the ADMIN_EMAIL and ADMIN_PASSWORD from your API environment.</p><div className="mt-8 space-y-4"><input className="input" value={email} onChange={e=>setEmail(e.target.value)} placeholder="Email"/><input className="input" type="password" value={password} onChange={e=>setPassword(e.target.value)} placeholder="Password"/><button disabled={loading} className="btn btn-dark w-full">{loading?'Signing in…':'Sign in'}</button>{err&&<div className="text-sm text-red-600">{err}</div>}</div></form></main>}
+'use client';
+import { useState } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { api, ApiError } from '../../lib/api';
+import PasswordInput from '../../components/PasswordInput';
+
+export default function Login() {
+  const router = useRouter();
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [err, setErr] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  async function go(e: React.FormEvent) {
+    e.preventDefault();
+    if (!email.trim() || !password) { setErr('Email aur password dono likhein.'); return; }
+    setLoading(true); setErr('');
+    try {
+      const x = await api<{ token: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ email: email.trim(), password }) });
+      localStorage.setItem('trust_token', x!.token);
+      router.push('/admin');
+    } catch (error: any) {
+      if (error instanceof ApiError) setErr(error.status === 401 ? 'Email ya password galat hai.' : error.message);
+      else setErr('Server se connect nahi ho paaya. Internet check karein ya thodi der baad try karein.');
+    } finally { setLoading(false); }
+  }
+
+  return (
+    <main className="min-h-screen grid place-items-center grid-bg px-5">
+      <form noValidate onSubmit={go} className="w-full max-w-md rounded-[32px] border bg-white p-8 shadow-soft">
+        <div className="font-extrabold">AMRIT VELA<span className="text-neutral-400"> TRUST</span></div>
+        <h1 className="mt-10 text-3xl font-extrabold">Admin sign in</h1>
+        <p className="mt-2 text-neutral-500">Apne admin email aur password se sign in karein.</p>
+        <div className="mt-8 space-y-4">
+          <input className="input" type="email" name="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
+          <PasswordInput value={password} onChange={setPassword} name="password" autoComplete="current-password" />
+          <button disabled={loading} className="btn btn-dark w-full">{loading ? 'Signing in…' : 'Sign in'}</button>
+          {err && <div role="alert" className="text-sm text-red-600">{err}</div>}
+          <div className="text-right text-sm"><Link href="/forgot-password" className="font-semibold text-neutral-600 underline">Password bhool gaye?</Link></div>
+        </div>
+      </form>
+    </main>
+  );
+}

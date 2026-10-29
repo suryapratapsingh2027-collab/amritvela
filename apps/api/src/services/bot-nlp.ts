@@ -80,8 +80,13 @@ export function findProducts<T extends NamedProduct>(text: string, products: T[]
     const isNegated = after.some((t) => NEGATION.has(t)) || (before !== undefined && PRE_NEGATION.has(before));
     (isNegated ? negated : wanted).push(p);
   }
-  wanted.sort((a, b) => spans.get(a.id)![0] - spans.get(b.id)![0]);
-  return { wanted, negated, spans };
+  // "Rudraksha Mala" also contains the word "Mala" (another product). The more specific, longer name wins.
+  const inside = (small: [number, number], big: [number, number]) => big[0] <= small[0] && small[1] <= big[1] && (big[1] - big[0]) > (small[1] - small[0]);
+  const dropContained = (list: T[]) => list.filter((p) => !list.some((q) => q.id !== p.id && inside(spans.get(p.id)!, spans.get(q.id)!)));
+  const wantedFinal = dropContained(wanted);
+  const negatedFinal = dropContained(negated);
+  wantedFinal.sort((a, b) => spans.get(a.id)![0] - spans.get(b.id)![0]);
+  return { wanted: wantedFinal, negated: negatedFinal, spans };
 }
 
 const NUMBER_WORDS: Record<string, number> = {
