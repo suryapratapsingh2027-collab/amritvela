@@ -34,6 +34,8 @@ enum OrderStatus {
 }
 
 model User {
+  // Preferred chat language chosen from the WhatsApp language list: en | hi | hing | pa | mr (null = not chosen yet)
+  language String?
   id String @id @default(cuid())
   phone String @unique
   name String?

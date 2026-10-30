@@ -4,7 +4,9 @@ import { Prisma } from '@prisma/client';
 import { db } from '../db';
 import { env } from '../config';
 import { verifySignature } from '../integrations/razorpay';
-import { sendWhatsAppImage, sendWhatsAppText } from '../integrations/whatsapp';
+import { interactiveToText, sendWhatsAppImage, sendWhatsAppInteractive, sendWhatsAppText } from '../integrations/whatsapp';
+import { normalizeLang, t } from '../i18n';
+import { isMenuWord } from '../services/bot-nlp';
 import { markOrderPaid } from '../services/fulfillment';
 import { answer, knowledge } from '../services/ai';
 import { routeWhatsAppMessage, type BotReply } from '../services/whatsapp-bot';
@@ -13,7 +15,6 @@ import { deliverDonationReceipt, markDonationPaid, sweepPendingPayments } from '
 
 const r = Router();
 
-const SUPPORT_LINE = 'Trust team se 6913001300 par sampark karein.';
 
 /* ================================================================== WHATSAPP */
 
@@ -39,6 +40,10 @@ function verifyMetaSignature(req: Request): boolean {
   return received.length === expected.length && crypto.timingSafeEqual(received, expected);
 }
 
+async function userLang(phone: string) {
+  try { return normalizeLang((await db.user.findUnique({ where: { phone }, select: { language: true } }))?.language); } catch { return null; }
+}
+
 /** Atomically claims a WhatsApp message id. Returns false if another delivery already claimed it. */
 async function claimWhatsAppMessage(messageId: string, payload: unknown): Promise<boolean> {
   try {
@@ -55,7 +60,7 @@ async function saveOut(conversationId: string, text: string, intent: string, wha
   await db.conversation.update({ where: { id: conversationId }, data: { lastMessageAt: new Date() } });
 }
 
-async function processIncoming(phone: string, text: string, whatsappMessageId: string): Promise<void> {
+async function processIncoming(phone: string, text: string, whatsappMessageId: string, replyId?: string): Promise<void> {
   const user = await db.user.upsert({ where: { phone }, update: {}, create: { phone } });
   let conversation = await db.conversation.findFirst({ where: { userId: user.id, channel: 'WHATSAPP' }, orderBy: { lastMessageAt: 'desc' } });
   if (!conversation) conversation = await db.conversation.create({ data: { userId: user.id } });
@@ -70,13 +75,14 @@ async function processIncoming(phone: string, text: string, whatsappMessageId: s
 
   // A human agent owns this chat: do not talk over them. The customer can hand the chat back with "menu".
   if (conversation.mode === 'HUMAN') {
-    if (/^\s*(menu|bot|start)\s*$/i.test(text)) {
+    if (isMenuWord(text) || /^\s*bot\s*$/i.test(text) || replyId?.startsWith('menu:') || replyId?.startsWith('lang:')) {
       await db.conversation.update({ where: { id: conversation.id }, data: { mode: 'AI' } });
       conversation = { ...conversation, mode: 'AI' };
     } else {
       const lastOut = await db.message.findFirst({ where: { conversationId: conversation.id, direction: 'OUT' }, orderBy: { createdAt: 'desc' }, select: { createdAt: true } });
       if (!lastOut || Date.now() - lastOut.createdAt.getTime() > 6 * 60 * 60 * 1000) {
-        const ack = `Aapka message Trust team ko mil gaya hai, woh jaldi jawab dengi. Bot par wapas aane ke liye "menu" likhein. ${SUPPORT_LINE}`;
+        const lang = normalizeLang(user.language);
+        const ack = t(lang, 'human_hold', { support: t(lang, 'support') });
         await sendWhatsAppText(phone, ack);
         await saveOut(conversation.id, ack, 'HUMAN_ACK', whatsappMessageId);
       }
@@ -85,11 +91,12 @@ async function processIncoming(phone: string, text: string, whatsappMessageId: s
   }
 
   // 1) Deterministic bot: donations, receipts, product orders, order/payment status.
-  let reply: BotReply | null = await routeWhatsAppMessage({ phone, text, conversationId: conversation.id });
+  let reply: BotReply | null = await routeWhatsAppMessage({ phone, text, conversationId: conversation.id, replyId });
 
   // 2) Otherwise a grounded AI answer about the Trust (never about money/orders).
   if (!reply) {
-    const out = await answer(text, await knowledge(), phone);
+    const fresh = await db.user.findUnique({ where: { id: user.id }, select: { language: true } });
+    const out = await answer(text, await knowledge(), phone, normalizeLang(fresh?.language));
     if (!out.text?.trim()) throw new Error('AI returned an empty response');
     reply = { text: out.text, intent: out.intent };
   }
@@ -101,8 +108,18 @@ async function processIncoming(phone: string, text: string, whatsappMessageId: s
     try { await sendWhatsAppImage(phone, reply.image.url, reply.image.caption); }
     catch (e: any) { console.error('[WHATSAPP] Product image failed, continuing with text:', e?.message || e); }
   }
-  await sendWhatsAppText(phone, reply.text);
-  await saveOut(conversation.id, reply.text, reply.intent, whatsappMessageId, reply.image ? { image: reply.image.url } : {});
+  if (reply.interactive) {
+    // Tap-to-choose list/buttons. If Meta rejects it for any reason, the same options are sent as plain numbered text.
+    try { await sendWhatsAppInteractive(phone, reply.interactive); }
+    catch (e: any) {
+      console.error('[WHATSAPP] Interactive message failed, falling back to text:', e?.response?.data ? JSON.stringify(e.response.data) : e?.message || e);
+      await sendWhatsAppText(phone, interactiveToText(reply.interactive));
+    }
+    await saveOut(conversation.id, interactiveToText(reply.interactive), reply.intent, whatsappMessageId, { interactive: true, ...(reply.image ? { image: reply.image.url } : {}) });
+  } else {
+    await sendWhatsAppText(phone, reply.text);
+    await saveOut(conversation.id, reply.text, reply.intent, whatsappMessageId, reply.image ? { image: reply.image.url } : {});
+  }
 
   if (reply.after) {
     try { await reply.after(); } catch (e: any) { console.error('[WHATSAPP] follow-up action failed:', e?.message || e); }
@@ -129,9 +146,13 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
 
           // Text, plus the visible title of button / list replies.
           let text = '';
+          let replyId: string | undefined;
           if (message.type === 'text') text = String(message.text?.body || '').trim();
-          else if (message.type === 'interactive') text = String(message.interactive?.button_reply?.title || message.interactive?.list_reply?.title || '').trim();
-          else if (message.type === 'button') text = String(message.button?.text || '').trim();
+          else if (message.type === 'interactive') {
+            const reply = message.interactive?.list_reply || message.interactive?.button_reply;
+            text = String(reply?.title || '').trim();
+            replyId = reply?.id ? String(reply.id) : undefined;
+          } else if (message.type === 'button') { text = String(message.button?.text || '').trim(); replyId = message.button?.payload ? String(message.button.payload) : undefined; }
 
           const dedupeKey = id || crypto.createHash('sha256').update(JSON.stringify(message)).digest('hex');
           if (!(await claimWhatsAppMessage(dedupeKey, { from: phone, type: message.type }))) {
@@ -142,15 +163,16 @@ r.post('/whatsapp', async (req: Request, res: Response) => {
           try {
             if (!text) {
               if (['image', 'audio', 'video', 'document', 'sticker', 'voice', 'location', 'contacts'].includes(message.type)) {
-                await sendWhatsAppText(phone, 'Abhi main sirf text messages samajh sakta hoon. Kripya apna sawaal text mein likhein. 🙏');
+                await sendWhatsAppText(phone, t(await userLang(phone), 'unsupported_media'));
               }
               continue;
             }
-            await processIncoming(phone, text, id);
+            await processIncoming(phone, text, id, replyId);
             console.log('[WHATSAPP] Processed message', id);
           } catch (error: any) {
             console.error('[WHATSAPP ERROR] Processing failed:', error?.message, error?.response?.data ? JSON.stringify(error.response.data) : '', error?.stack);
-            await sendWhatsAppText(phone, `Maaf kijiye, abhi aapka message process nahi ho paaya. Kripya thodi der baad dobara try karein. ${SUPPORT_LINE}`).catch(() => undefined);
+            const lang = await userLang(phone);
+            await sendWhatsAppText(phone, t(lang, 'processing_error', { support: t(lang, 'support') })).catch(() => undefined);
           }
         }
       }
@@ -289,7 +311,7 @@ r.post('/shiprocket', async (req: Request, res: Response) => {
       if (nextStatus === 'DELIVERED' || nextStatus === 'OUT_FOR_DELIVERY') {
         const user = await db.user.findUnique({ where: { id: order.userId } });
         if (user?.phone) {
-          const msg = nextStatus === 'DELIVERED' ? `Aapka order ${order.orderNumber} deliver ho gaya hai. Dhanyavaad! 🙏` : `Aapka order ${order.orderNumber} aaj delivery ke liye nikla hai.`;
+          const msg = t(normalizeLang(user.language), nextStatus === 'DELIVERED' ? 'ship_delivered' : 'ship_ofd', { number: order.orderNumber });
           await sendWhatsAppText(user.phone, msg).catch((error) => console.error('[SHIPROCKET WHATSAPP ERROR]', error?.response?.data || error?.message || error));
         }
       }

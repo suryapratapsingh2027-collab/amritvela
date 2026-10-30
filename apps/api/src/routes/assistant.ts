@@ -4,7 +4,8 @@ import { db } from '../db';
 import { answer, knowledge } from '../services/ai';
 import { routeWhatsAppMessage } from '../services/whatsapp-bot';
 import { openSupportTicket } from '../services/support';
-import { sendWhatsAppText } from '../integrations/whatsapp';
+import { interactiveToText, sendWhatsAppText, type InteractiveSpec } from '../integrations/whatsapp';
+import { normalizeLang } from '../i18n';
 import { auth } from '../middleware/auth';
 import { normalizePhone } from '../utils/phone';
 import { rateLimit } from '../utils/rate-limit';
@@ -16,7 +17,16 @@ const body = z.object({
   name: z.string().trim().max(60).optional(),
   message: z.string().trim().min(1, 'Message khali hai').max(1000, 'Message 1000 akshar se chhota rakhein'),
   conversationId: z.string().max(60).optional(),
+  // id of a tapped option chip (same ids as WhatsApp list rows / buttons, e.g. "menu:donate")
+  replyId: z.string().max(200).optional(),
 });
+
+/** Flattens a WhatsApp list/buttons spec into tappable chips for the website widget. */
+function toOptions(spec?: InteractiveSpec) {
+  if (!spec) return null;
+  if (spec.kind === 'buttons') return spec.buttons.map((b) => ({ id: b.id, title: b.title }));
+  return spec.sections.flatMap((sec) => sec.rows.map((r) => ({ id: r.id, title: r.title, description: r.description })));
+}
 
 /**
  * Website chat. It uses the SAME deterministic assistant as WhatsApp (donations, orders, receipts, order status)
@@ -49,17 +59,18 @@ r.post('/', rateLimit({ windowMs: 60_000, max: 25, message: 'Bahut zyada message
     // A human agent owns this chat; their replies arrive through /poll.
     if (mode === 'HUMAN') return res.json({ conversationId: conversation.id, mode, held: true, text: '', intent: 'HUMAN_HOLD', now: new Date().toISOString() });
 
-    let reply = await routeWhatsAppMessage({ phone, text: message, conversationId: conversation.id, channel: 'web' });
+    let reply = await routeWhatsAppMessage({ phone, text: message, conversationId: conversation.id, channel: 'web', replyId: parsed.data.replyId });
     if (!reply) {
-      const out = await answer(message, await knowledge(), phone);
+      const lang = normalizeLang((await db.user.findUnique({ where: { id: user.id }, select: { language: true } }))?.language);
+      const out = await answer(message, await knowledge(), phone, lang);
       if (!out.text?.trim()) throw new Error('AI returned an empty response');
       reply = { text: out.text, intent: out.intent };
     }
     if (reply.intent === 'HUMAN') { await openSupportTicket(conversation.id, 'Website visitor requested human support'); mode = 'HUMAN'; }
 
-    await db.message.create({ data: { conversationId: conversation.id, direction: 'OUT', text: reply.text, metadata: { intent: reply.intent, channel: 'WEB', ...(reply.image ? { image: reply.image.url } : {}) } } });
+    await db.message.create({ data: { conversationId: conversation.id, direction: 'OUT', text: reply.interactive ? interactiveToText(reply.interactive) : reply.text, metadata: { intent: reply.intent, channel: 'WEB', ...(reply.image ? { image: reply.image.url } : {}) } } });
     await db.conversation.update({ where: { id: conversation.id }, data: { lastMessageAt: new Date() } });
-    res.json({ conversationId: conversation.id, mode, text: reply.text, intent: reply.intent, image: reply.image || null, now: new Date().toISOString() });
+    res.json({ conversationId: conversation.id, mode, text: reply.text, intent: reply.intent, image: reply.image || null, options: toOptions(reply.interactive), now: new Date().toISOString() });
   } catch (e: any) {
     console.error('[ASSISTANT] failed:', e?.message || e);
     res.status(500).json({ error: 'Assistant abhi available nahi hai. Kripya thodi der baad try karein.' });

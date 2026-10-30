@@ -25,12 +25,13 @@ const { PrismaPg } = require('@prisma/adapter-pg');
 const db = new testClient.PrismaClient({ adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }) });
 
 // ---- fakes
-type Sent = { to: string; kind: 'text' | 'pdf' | 'doc' | 'image'; text?: string; filename?: string; bytes?: number; url?: string };
+type Sent = { to: string; kind: 'text' | 'pdf' | 'doc' | 'image' | 'interactive'; text?: string; filename?: string; bytes?: number; url?: string; spec?: any };
 const outbox: Sent[] = [];
 const rzp = new Map<string, { state: 'paid' | 'unpaid' | 'expired'; amountPaidPaise: number; paymentId?: string }>();
 let linkSeq = 0;
 let failLinkCreation = false;
 let failImage = false;
+let failInteractive = false;
 const WINDOW_CLOSED_PHONE = '919000000777';
 let awbFail = false;
 const shipCalls: any[] = [];
@@ -47,6 +48,7 @@ const origLoad = (Module as any)._load;
     return { ...real,
       sendWhatsAppText: async (to: string, text: string) => { if (to === WINDOW_CLOSED_PHONE) { const err: any = new Error('Request failed'); err.response = { data: { error: { code: 131047, message: 'Re-engagement message' } } }; throw err; } outbox.push({ to, kind: 'text', text }); return { ok: true }; },
       sendWhatsAppPdf: async (to: string, pdf: Buffer, filename: string) => { assert.ok(pdf.slice(0, 4).toString() === '%PDF', 'receipt must be a real PDF'); outbox.push({ to, kind: 'pdf', filename, bytes: pdf.length }); return { ok: true }; },
+      sendWhatsAppInteractive: async (to: string, raw: any) => { if (failInteractive) throw new Error('interactive rejected'); const spec = real.sanitizeInteractive(raw); outbox.push({ to, kind: 'interactive', spec }); return { ok: true }; },
       sendWhatsAppImage: async (to: string, url: string, caption?: string) => { if (failImage) throw new Error('image rejected'); outbox.push({ to, kind: 'image', url, text: caption }); return { ok: true }; },
       sendWhatsAppDocument: async (to: string, _l: string, filename: string) => { outbox.push({ to, kind: 'doc', filename }); return { ok: true }; },
     };
@@ -111,16 +113,25 @@ let base = '';
 let msgSeq = 0;
 const PHONE = '919876500001';
 function metaSig(body: string) { return 'sha256=' + crypto.createHmac('sha256', 'appsecret').update(body).digest('hex'); }
-async function wa(phone: string, text: string, opts: { id?: string; type?: string } = {}) {
+async function wa(phone: string, text: string, opts: { id?: string; type?: string; tap?: string; tapType?: 'list_reply' | 'button_reply' } = {}) {
   const message: any = { from: phone, id: opts.id || `wamid.${++msgSeq}`, type: opts.type || 'text' };
-  if (message.type === 'text') message.text = { body: text };
+  if (opts.tap) { message.type = 'interactive'; const kind = opts.tapType || 'list_reply'; message.interactive = { type: kind, [kind]: { id: opts.tap, title: text } }; }
+  else if (message.type === 'text') message.text = { body: text };
   const body = JSON.stringify({ object: 'whatsapp_business_account', entry: [{ changes: [{ value: { messages: [message] } }] }] });
   const from = outbox.length;
   const res = await fetch(`${base}/webhooks/whatsapp`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-hub-signature-256': metaSig(body) }, body });
   assert.equal(res.status, 200, 'whatsapp webhook must answer 200');
   return outbox.slice(from);
 }
-const texts = (r: Sent[]) => r.filter((m) => m.kind === 'text').map((m) => m.text!).join('\n---\n');
+const interactiveText = (m: Sent) => {
+  const sp = m.spec; if (!sp) return '';
+  if (sp.kind === 'buttons') return `${sp.body}\n${sp.buttons.map((b: any) => `[${b.title}]`).join(' ')}`;
+  return `${sp.body}\n${sp.sections.flatMap((x: any) => x.rows).map((r: any) => `${r.title}${r.description ? ` — ${r.description}` : ''}`).join('\n')}`;
+};
+const texts = (r: Sent[]) => r.filter((m) => m.kind === 'text' || m.kind === 'interactive').map((m) => (m.kind === 'text' ? m.text! : interactiveText(m))).join('\n---\n');
+const tap = (phone: string, id: string, title = id, type: 'list_reply' | 'button_reply' = 'list_reply') => wa(phone, title, { tap: id, tapType: type });
+const lastInteractive = (r: Sent[]) => [...r].reverse().find((m) => m.kind === 'interactive');
+const rowIds = (m?: Sent) => (m?.spec?.kind === 'list' ? m.spec.sections.flatMap((x: any) => x.rows.map((r: any) => r.id)) : (m?.spec?.buttons || []).map((b: any) => b.id));
 async function razorpayEvent(payload: any, opts: { badSig?: boolean } = {}) {
   const body = JSON.stringify(payload);
   const sig = crypto.createHmac('sha256', 'whsec_test').update(opts.badSig ? body + 'x' : body).digest('hex');
@@ -167,7 +178,7 @@ async function reset() {
   });
   await test('address -> order summary for Nariyal, ₹100 + ₹80 = ₹180', async () => {
     const t = texts(await wa(PHONE, ADDR));
-    assert.match(t, /Product: Nariyal x 1/); assert.match(t, /Total: ₹180/); assert.match(t, /"haan"/);
+    assert.match(t, /Product: Nariyal x 1/); assert.match(t, /Total: ₹180/); assert.match(t, /\[Confirm karein ✅\]/);
     assert.equal(await db.order.count(), 0, 'no order may exist before confirmation');
   });
   await test('"haan" -> order really created for Nariyal with payment link', async () => {
@@ -231,7 +242,7 @@ async function reset() {
   });
   await test('"Kardiya donation" BEFORE payment lands: honest, no fake PAID, no "kitni rakam"', async () => {
     const t = texts(await wa(PHONE, 'Kardiya donation'));
-    assert.doesNotMatch(t, /kitni rakam/); assert.match(t, /abhi tak receive nahi hua/);
+    assert.doesNotMatch(t, /amt:other|Doosra amount/); assert.match(t, /abhi tak receive nahi hua/);
     assert.equal((await db.donation.findFirstOrThrow()).paymentStatus, 'PENDING');
   });
   await test('Razorpay says paid but NO webhook ever arrived: "Kardiya donation" reconciles live + sends PDF receipt', async () => {
@@ -245,7 +256,7 @@ async function reset() {
     assert.doesNotMatch(texts(sent), /product|Gangajal/i); assert.ok(sent.some((m) => m.kind === 'pdf'));
   });
   await test('bare amount after "kitni rakam" works: "Donation karna hai" -> "500"', async () => {
-    const t1 = texts(await wa(PHONE, 'Donation karna hai')); assert.match(t1, /kitni rakam/);
+    const r1 = await wa(PHONE, 'Donation karna hai'); assert.deepEqual(rowIds(lastInteractive(r1)), ['amt:101', 'amt:501', 'amt:1100', 'amt:2100', 'amt:5100', 'amt:other']);
     const t2 = texts(await wa(PHONE, '500')); assert.match(t2, /₹500/); assert.match(t2, /https:\/\/rzp\.io/);
   });
   await test('donor without a name is asked for it first (receipt needs a name)', async () => {
@@ -347,7 +358,7 @@ async function reset() {
   });
   await test('greeting resets a half-finished checkout and shows the menu', async () => {
     await reset(); await wa(PHONE, 'Gangajal chahiye'); const t = texts(await wa(PHONE, 'Hello'));
-    assert.match(t, /swagat/); assert.equal((await db.conversation.findFirstOrThrow()).state, null);
+    assert.match(t, /Welcome to Amrit Vela Trust/); assert.equal((await db.conversation.findFirstOrThrow()).state, null);
   });
   await test('stale checkout state (>30 min) is ignored; address text is not swallowed as an order', async () => {
     await reset(); await wa(PHONE, 'Gangajal chahiye');
@@ -358,7 +369,7 @@ async function reset() {
     await reset(); const t = texts(await wa(PHONE, 'mujhe kisi insaan se baat karni hai'));
     assert.match(t, /Trust team ko note/); assert.equal(await db.supportTicket.count(), 1);
     const silent = await wa(PHONE, 'koi hai?'); assert.equal(silent.length, 0);
-    assert.match(texts(await wa(PHONE, 'menu')), /swagat/);
+    assert.match(texts(await wa(PHONE, 'menu')), /Welcome to Amrit Vela Trust/);
   });
   await test('voice/image message -> polite text-only notice', async () => {
     assert.match(texts(await wa(PHONE, '', { type: 'audio' })), /text messages/);
@@ -590,7 +601,7 @@ async function reset() {
     const c = (await http('GET', '/api/admin/conversations', { token: adminToken })).json.find((x: any) => x.user.phone === PHONE);
     assert.equal((await http('PATCH', `/api/admin/conversations/${c.id}`, { token: adminToken, body: { mode: 'BANANA' } })).status, 400);
     assert.equal((await http('PATCH', `/api/admin/conversations/${c.id}`, { token: adminToken, body: { mode: 'AI' } })).status, 200);
-    assert.equal(await db.supportTicket.count({ where: { status: 'OPEN' } }), 0); assert.match(texts(await wa(PHONE, 'hello')), /swagat/);
+    assert.equal(await db.supportTicket.count({ where: { status: 'OPEN' } }), 0); assert.match(texts(await wa(PHONE, 'hello')), /Welcome to Amrit Vela Trust/);
   });
 
   console.log('\nWEBSITE ASSISTANT (client complaint: "order id maang raha hai")');
@@ -629,7 +640,7 @@ async function reset() {
     outbox.length = 0; const rep = await http('POST', `/api/admin/conversations/${webC.id}/reply`, { token: adminToken, body: { text: 'Namaste, main yahan hoon.' } }); assert.equal(rep.status, 201); assert.equal(rep.json.delivered, 'website'); assert.equal(outbox.length, 0, 'web replies are not sent to WhatsApp');
     const poll = await http('GET', `/api/assistant/poll?conversationId=${webConv}&since=${encodeURIComponent(since)}`); assert.equal(poll.json.messages.length, 1); assert.match(poll.json.messages[0].text, /main yahan hoon/);
     const hist = await http('GET', `/api/assistant/history?conversationId=${webConv}`); assert.ok(hist.json.messages.some((m: any) => m.byAdmin));
-    assert.match((await web('menu')).json.text, /swagat/);
+    assert.match((await web('menu')).json.text, /Welcome to Amrit Vela Trust/);
   });
   await test('website checkout API: phone normalised, PIN required, stock message hides numbers', async () => {
     const prod = await db.product.findFirstOrThrow({ where: { name: 'Nariyal' } });
@@ -638,6 +649,128 @@ async function reset() {
     const tooMany = await http('POST', '/api/orders', { body: { phone: '9876500055', name: 'Ram Kumar', address: 'Gandhi road, near temple, Vidisha 464001', items: [{ productId: prod.id, quantity: 999 }] } }); assert.equal(tooMany.status, 400); assert.doesNotMatch(tooMany.json.error, /\b40\b/);
     const ok = await http('POST', '/api/orders', { body: { phone: '+91 98765 00055', name: 'Ram Kumar', address: 'Gandhi road, near temple, Vidisha 464001', items: [{ productId: prod.id, quantity: 2 }] } }); assert.equal(ok.status, 201, JSON.stringify(ok.json));
     assert.equal(ok.json.order.total, 280); assert.equal((await db.user.findFirstOrThrow({ where: { phone: '919876500055' } })).name, 'Ram Kumar');
+  });
+
+
+  console.log('\nLANGUAGE PICKER + TAP MENUS (client request: hello -> language list -> menu in that language)');
+  await reset();
+  const NEWBIE = '919811100001';
+  await test('first "Hello" from a new customer -> welcome + language list (English, Hindi, Hinglish, Punjabi, Marathi)', async () => {
+    const sent = await wa(NEWBIE, 'Hello'); const m = lastInteractive(sent)!;
+    assert.equal(m.spec.kind, 'list'); assert.deepEqual(rowIds(m), ['lang:en', 'lang:hi', 'lang:hing', 'lang:pa', 'lang:mr']);
+    assert.match(m.spec.body, /Welcome to Amrit Vela Trust/); assert.match(m.spec.body, /कृपया अपनी भाषा चुनें/); assert.match(m.spec.body, /ਕਿਰਪਾ ਕਰਕੇ/);
+    const titles = m.spec.sections[0].rows.map((r: any) => r.title); assert.deepEqual(titles, ['English', 'हिन्दी (Hindi)', 'Hinglish', 'ਪੰਜਾਬੀ (Punjabi)', 'मराठी (Marathi)']);
+    assert.ok(m.spec.button.length <= 20);
+  });
+  await test('tap Punjabi -> saved on the customer, menu comes back in Punjabi with the confirmation', async () => {
+    const sent = await tap(NEWBIE, 'lang:pa', 'ਪੰਜਾਬੀ (Punjabi)'); const m = lastInteractive(sent)!;
+    assert.equal((await db.user.findUniqueOrThrow({ where: { phone: NEWBIE } })).language, 'pa');
+    assert.match(m.spec.body, /ਭਾਸ਼ਾ ਪੰਜਾਬੀ ਚੁਣ ਲਈ ਗਈ ਹੈ ✅/); assert.match(m.spec.body, /ਮੈਂ ਤੁਹਾਡੀ ਕੀ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ/);
+    assert.deepEqual(rowIds(m), ['menu:info', 'menu:donate', 'menu:contact', 'menu:products', 'menu:status', 'menu:receipt', 'menu:human', 'menu:lang']);
+    assert.match(texts(sent), /ਟਰੱਸਟ ਬਾਰੇ ਜਾਣਕਾਰੀ/);
+  });
+  await test('a later "Hello" shows the main menu (not the language list again), still in Punjabi', async () => {
+    const m = lastInteractive(await wa(NEWBIE, 'hello'))!; assert.ok(rowIds(m).includes('menu:donate')); assert.doesNotMatch(m.spec.body, /Welcome to Amrit Vela Trust/); assert.match(m.spec.body, /ਮੈਂ ਤੁਹਾਡੀ/);
+  });
+  await test('"Trust ki jankari" -> topic list -> topic text in Punjabi with Donate / More topics / Main menu buttons', async () => {
+    const list = lastInteractive(await tap(NEWBIE, 'menu:info'))!; assert.deepEqual(rowIds(list), ['info:about', 'info:kirtan', 'info:dharamshala', 'info:medical', 'info:achievements', 'info:plans']);
+    const about = lastInteractive(await tap(NEWBIE, 'info:about'))!; assert.equal(about.spec.kind, 'buttons'); assert.match(about.spec.body, /4 ਸਤੰਬਰ 2014/); assert.deepEqual(rowIds(about), ['menu:donate', 'menu:info', 'menu:main']);
+    const kirtan = lastInteractive(await tap(NEWBIE, 'info:kirtan'))!; assert.match(kirtan.spec.body, /1,50,000/); assert.match(kirtan.spec.body, /2:30/);
+  });
+  await test('contact row shows the real address / phone / email', async () => {
+    const m = lastInteractive(await tap(NEWBIE, 'menu:contact'))!; assert.match(m.spec.body, /ਸੈਕਸ਼ਨ 26, ਉਲਹਾਸਨਗਰ-4/); assert.match(m.spec.body, /6913001300/); assert.match(m.spec.body, /amritvelatrustlive@gmail.com/);
+  });
+  await test('social row: hidden unless links are configured', async () => {
+    const menu = lastInteractive(await tap(NEWBIE, 'menu:main'))!; assert.ok(!rowIds(menu).includes('menu:social'));
+    assert.match(texts(await tap(NEWBIE, 'menu:social')), /ਸੋਸ਼ਲ ਮੀਡੀਆ ਲਿੰਕ/);
+  });
+  await test('Donate -> amount list; tap ₹501 -> asks the name (new customer) in Punjabi -> link with the Punjabi message', async () => {
+    const amounts = lastInteractive(await tap(NEWBIE, 'menu:donate'))!; assert.deepEqual(rowIds(amounts), ['amt:101', 'amt:501', 'amt:1100', 'amt:2100', 'amt:5100', 'amt:other']);
+    assert.match(texts(await tap(NEWBIE, 'amt:501', '₹501')), /₹501 ਦੇ ਦਾਨ ਲਈ ਧੰਨਵਾਦ/);
+    const link = texts(await wa(NEWBIE, 'Gurpreet Singh')); assert.match(link, /ਸਤ ਸ੍ਰੀ ਅਕਾਲ Gurpreet Singh/); assert.match(link, /₹501/); assert.match(link, /https:\/\/rzp\.io\/rzp\/plink_/);
+    assert.equal((await db.donation.findFirstOrThrow({ where: { user: { phone: NEWBIE } } })).amount, 501);
+  });
+  await test('"Other amount" asks for a number in Punjabi, then a typed amount creates the donation', async () => {
+    assert.match(texts(await tap(NEWBIE, 'amt:other', 'ਹੋਰ ਰਕਮ')), /ਕਿੰਨੀ ਰਕਮ ਦਾਨ/);
+    assert.match(texts(await wa(NEWBIE, '750')), /₹750/); assert.equal(await db.donation.count({ where: { amount: 750 } }), 1);
+  });
+  await test('Our Products -> tap-list of in-stock products with prices; tap one -> address prompt (Punjabi) + photo', async () => {
+    await db.product.updateMany({ where: { name: 'Nariyal' }, data: { imageUrl: 'https://res.cloudinary.com/demo/image/upload/v1/x/n.png' } });
+    const list = lastInteractive(await tap(NEWBIE, 'menu:products'))!; const rows = list.spec.sections[0].rows;
+    assert.deepEqual(rows.map((r: any) => r.title).sort(), ['Gangajal', 'Mala', 'Nariyal']); assert.deepEqual(rows.find((r: any) => r.title === 'Nariyal').description, '₹100');
+    const nariyal = await db.product.findFirstOrThrow({ where: { name: 'Nariyal' } });
+    const sent = await tap(NEWBIE, `prod:${nariyal.id}`, 'Nariyal'); assert.match(texts(sent), /ਡਿਲੀਵਰੀ ਲਈ ਕਿਰਪਾ ਕਰਕੇ/); assert.ok(sent.some((x) => x.kind === 'image'));
+  });
+  await test('address -> summary with 3 buttons (Confirm / Change address / Cancel) in Punjabi; "Change address" re-asks; Confirm creates the order', async () => {
+    const sum = lastInteractive(await wa(NEWBIE, ADDR))!; assert.equal(sum.spec.kind, 'buttons'); assert.deepEqual(rowIds(sum), ['cfm:yes', 'cfm:addr', 'cfm:no']);
+    assert.deepEqual(sum.spec.buttons.map((b: any) => b.title), ['ਪੱਕਾ ਕਰੋ ✅', 'ਪਤਾ ਬਦਲੋ', 'ਰੱਦ ਕਰੋ']); assert.match(sum.spec.body, /ਕੁੱਲ: ₹180/);
+    assert.match(texts(await tap(NEWBIE, 'cfm:addr', 'ਪਤਾ ਬਦਲੋ', 'button_reply')), /ਨਵਾਂ ਪੂਰਾ ਡਿਲੀਵਰੀ ਪਤਾ/);
+    await wa(NEWBIE, 'Gandhi road near temple Vidisha Madhya Pradesh 464001');
+    const done = texts(await tap(NEWBIE, 'cfm:yes', 'ਪੱਕਾ ਕਰੋ ✅', 'button_reply')); assert.match(done, /ਤੁਹਾਡਾ ਆਰਡਰ ਬਣ ਗਿਆ ਹੈ/); assert.match(done, /https:\/\/rzp\.io/);
+    const o = await db.order.findFirstOrThrow({ where: { user: { phone: NEWBIE } }, include: { items: { include: { product: true } } } }); assert.equal(o.items[0].product.name, 'Nariyal'); assert.equal(o.total, 180);
+  });
+  await test('a stale Confirm button (session already finished) never creates another order', async () => {
+    const before = await db.order.count(); const m = lastInteractive(await tap(NEWBIE, 'cfm:yes', 'ਪੱਕਾ ਕਰੋ ✅', 'button_reply'))!;
+    assert.equal(await db.order.count(), before); assert.ok(rowIds(m).includes('menu:donate'));
+  });
+  await test('"Cancel" button ends checkout in the customer language', async () => {
+    const nariyal = await db.product.findFirstOrThrow({ where: { name: 'Nariyal' } });
+    await tap(NEWBIE, `prod:${nariyal.id}`, 'Nariyal'); await wa(NEWBIE, ADDR);
+    assert.match(texts(await tap(NEWBIE, 'cfm:no', 'ਰੱਦ ਕਰੋ', 'button_reply')), /ਪ੍ਰਕਿਰਿਆ ਰੱਦ ਕਰ ਦਿੱਤੀ/);
+  });
+  await test('status / receipt rows answer in the customer language (nothing yet -> localised "not found")', async () => {
+    const fresh = '919811100002'; await wa(fresh, 'hello'); await tap(fresh, 'lang:mr', 'मराठी (Marathi)');
+    assert.match(texts(await tap(fresh, 'menu:status')), /अलीकडील देणगी किंवा ऑर्डर सापडली नाही/);
+    assert.match(texts(await tap(fresh, 'menu:receipt')), /अलीकडील देणगी किंवा ऑर्डर सापडली नाही/);
+  });
+  await test('Marathi customer can answer the confirmation by typing "हो" and cancel with "नाही"', async () => {
+    const mr = '919811100002'; await db.user.update({ where: { phone: mr }, data: { name: 'Ramesh Patil' } });
+    await wa(mr, 'Mala order'); await wa(mr, 'Gandhi road near temple Vidisha Madhya Pradesh 464001');
+    assert.match(texts(await wa(mr, 'हो')), /तुमची ऑर्डर तयार झाली आहे/);
+    await wa(mr, 'Mala order'); await wa(mr, 'Gandhi road near temple Vidisha Madhya Pradesh 464001');
+    assert.match(texts(await wa(mr, 'नाही')), /प्रक्रिया रद्द केली आहे/);
+  });
+  await test('Hindi customer: donation link, then the payment confirmation + receipt caption arrive in Hindi', async () => {
+    const hi = '919811100003'; await wa(hi, 'hello'); await tap(hi, 'lang:hi', 'हिन्दी (Hindi)'); await db.user.update({ where: { phone: hi }, data: { name: 'Sunita' } });
+    const link = texts(await wa(hi, 'Donation 900')); assert.match(link, /नमस्ते Sunita! अमृत वेला ट्रस्ट को ₹900/);
+    const d = await db.donation.findFirstOrThrow({ where: { user: { phone: hi } } }); outbox.length = 0;
+    const ev = await razorpayEvent({ event: 'payment_link.paid', payload: { payment_link: { entity: { id: d.razorpayOrderId, amount_paid: 90000, notes: { donationId: d.id } } }, payment: { entity: { id: 'pay_HI' } } } });
+    assert.equal(ev.status, 200); assert.match(texts(ev.sent), /धन्यवाद! आपका ₹900 का दान पक्का हो गया है/); assert.ok(ev.sent.some((x) => x.kind === 'pdf'));
+  });
+  await test('Hindi customer: order paid -> confirmation in Hindi', async () => {
+    const hi = '919811100003'; const nariyal = await db.product.findFirstOrThrow({ where: { name: 'Nariyal' } });
+    await tap(hi, `prod:${nariyal.id}`, 'Nariyal'); await wa(hi, ADDR); await tap(hi, 'cfm:yes', 'पक्का करें ✅', 'button_reply');
+    const o = await db.order.findFirstOrThrow({ where: { user: { phone: hi } } }); outbox.length = 0;
+    const ev = await razorpayEvent({ event: 'payment_link.paid', payload: { payment_link: { entity: { id: o.razorpayOrderId, amount_paid: o.total * 100, notes: { orderNumber: o.orderNumber } } }, payment: { entity: { id: 'pay_HI2' } } } });
+    assert.match(texts(ev.sent), /आपका भुगतान सत्यापित हो गया है/);
+  });
+  await test('typing "language" / "भाषा" reopens the language list; switching language changes the next replies', async () => {
+    const m = lastInteractive(await wa(NEWBIE, 'language'))!; assert.equal(rowIds(m).length, 5);
+    assert.equal(rowIds(lastInteractive(await wa(NEWBIE, 'भाषा'))).length, 5);
+    const en = lastInteractive(await tap(NEWBIE, 'lang:en', 'English'))!; assert.match(en.spec.body, /Language set to English ✅/); assert.match(texts(await wa(NEWBIE, 'Mala kitne ka hai')), /Mala — ₹10\./);
+  });
+  await test('Trust questions typed in free text are answered in the customer language (translated topic, no Gemini needed)', async () => {
+    const mr = '919811100002'; const t1 = texts(await wa(mr, 'Trust me langar kab hota hai')); assert.match(t1, /दररोज सुमारे १,५०,००० लोकांना/); assert.match(t1, /अधिक माहितीसाठी/);
+    const pa = texts(await wa(NEWBIE, 'trust ka address kahan hai')); assert.match(pa, /Ulhasnagar-4/);
+  });
+  await test('Meta rejects an interactive message -> customer still gets the same options as numbered plain text', async () => {
+    failInteractive = true; const sent = await wa(NEWBIE, 'menu'); failInteractive = false;
+    const t1 = texts(sent); assert.ok(sent.every((x) => x.kind === 'text')); assert.match(t1, /1\. About the Trust/); assert.match(t1, /Donate/);
+  });
+  await test('an agent owns the chat: taps on the menu bring the bot back; other taps stay silent', async () => {
+    const hp = '919811100004'; await wa(hp, 'hello'); await tap(hp, 'lang:en', 'English'); await tap(hp, 'menu:human', 'Talk to our team');
+    assert.equal((await db.conversation.findFirstOrThrow({ where: { user: { phone: hp } } })).mode, 'HUMAN'); assert.equal((await wa(hp, 'koi hai?')).length, 0);
+    assert.ok(lastInteractive(await tap(hp, 'menu:main', 'Main menu')));
+  });
+  await test('every tapped option is stored in the transcript so admins see what the customer saw', async () => {
+    const conv = await db.conversation.findFirstOrThrow({ where: { user: { phone: NEWBIE } } });
+    const out = await db.message.findMany({ where: { conversationId: conv.id, direction: 'OUT' } }); assert.ok(out.some((m) => /1\. /.test(m.text) && (m.metadata as any)?.interactive));
+  });
+  await test('website chat: "hello" returns the language chips; tapping one (replyId) switches language and returns menu chips', async () => {
+    webConv = ''; const first = await web('hello', { phone: '9811100005' }); assert.deepEqual(first.json.options.map((o: any) => o.id), ['lang:en', 'lang:hi', 'lang:hing', 'lang:pa', 'lang:mr']);
+    const pick = await web('हिन्दी (Hindi)', { phone: '9811100005', replyId: 'lang:hi' }); assert.match(pick.json.text, /भाषा हिन्दी चुन ली गई है/); assert.ok(pick.json.options.some((o: any) => o.id === 'menu:donate'));
+    const donate = await web('दान करें', { phone: '9811100005', replyId: 'menu:donate' }); assert.ok(donate.json.options.some((o: any) => o.id === 'amt:501'));
+    assert.equal((await db.user.findUniqueOrThrow({ where: { phone: '919811100005' } })).language, 'hi');
   });
 
   console.log('\nBOOTSTRAP KNOWLEDGE LOADER');

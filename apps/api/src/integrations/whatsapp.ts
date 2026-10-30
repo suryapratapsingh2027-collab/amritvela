@@ -223,3 +223,61 @@ export function whatsappErrorInfo(error: any): { code?: number; message: string;
 }
 
 export function whatsappLive(): boolean { return !isMockMode(); }
+
+/* ------------------------------------------------------------------ interactive messages */
+
+export type InteractiveRow = { id: string; title: string; description?: string };
+export type InteractiveSpec =
+  | { kind: 'list'; header?: string; body: string; footer?: string; button: string; sections: { title?: string; rows: InteractiveRow[] }[] }
+  | { kind: 'buttons'; body: string; buttons: { id: string; title: string }[] };
+
+const cut = (s: string, n: number) => (s.length <= n ? s : s.slice(0, n - 1).trimEnd() + '…');
+
+/** Enforces WhatsApp's hard limits so a long translation can never make Meta reject the whole message. */
+export function sanitizeInteractive(spec: InteractiveSpec): InteractiveSpec {
+  if (spec.kind === 'buttons') {
+    return { kind: 'buttons', body: cut(spec.body, 1024), buttons: spec.buttons.slice(0, 3).map((b) => ({ id: cut(b.id, 256), title: cut(b.title, 20) })) };
+  }
+  let remaining = 10; // WhatsApp allows at most 10 rows across all sections
+  const sections = spec.sections.map((s) => {
+    const rows = s.rows.slice(0, Math.max(0, remaining)).map((r) => ({ id: cut(r.id, 200), title: cut(r.title, 24), ...(r.description ? { description: cut(r.description, 72) } : {}) }));
+    remaining -= rows.length;
+    return { ...(s.title ? { title: cut(s.title, 24) } : {}), rows };
+  }).filter((s) => s.rows.length);
+  return { kind: 'list', ...(spec.header ? { header: cut(spec.header, 60) } : {}), body: cut(spec.body, 1024), ...(spec.footer ? { footer: cut(spec.footer, 60) } : {}), button: cut(spec.button, 20), sections };
+}
+
+/** Plain-text rendering of an interactive message (fallback when Meta rejects it, website chat, admin inbox). */
+export function interactiveToText(spec: InteractiveSpec): string {
+  if (spec.kind === 'buttons') return `${spec.body}\n\n${spec.buttons.map((b, i) => `${i + 1}. ${b.title}`).join('\n')}`;
+  const rows = spec.sections.flatMap((s) => s.rows);
+  return `${spec.body}\n\n${rows.map((r, i) => `${i + 1}. ${r.title}${r.description ? ` — ${r.description}` : ''}`).join('\n')}`;
+}
+
+export async function sendWhatsAppInteractive(to: string, rawSpec: InteractiveSpec): Promise<any> {
+  const spec = sanitizeInteractive(rawSpec);
+  if (isMockMode()) {
+    console.warn('[WhatsApp] Mock mode enabled or credentials missing; interactive message not sent.');
+    return { mock: true, to };
+  }
+  const interactive: any = spec.kind === 'buttons'
+    ? { type: 'button', body: { text: spec.body }, action: { buttons: spec.buttons.map((b) => ({ type: 'reply', reply: { id: b.id, title: b.title } })) } }
+    : {
+        type: 'list',
+        ...(spec.header ? { header: { type: 'text', text: spec.header } } : {}),
+        body: { text: spec.body },
+        ...(spec.footer ? { footer: { text: spec.footer } } : {}),
+        action: { button: spec.button, sections: spec.sections },
+      };
+  try {
+    const response = await axios.post(
+      getWhatsAppMessagesUrl(),
+      { messaging_product: 'whatsapp', recipient_type: 'individual', to, type: 'interactive', interactive },
+      { headers: { Authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 20000 },
+    );
+    return response.data;
+  } catch (error: unknown) {
+    logWhatsAppError('interactive', error);
+    throw error;
+  }
+}

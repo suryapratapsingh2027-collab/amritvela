@@ -1,5 +1,6 @@
 import { db } from '../db';
 import { env } from '../config';
+import { normalizeLang, t } from '../i18n';
 import { fetchProviderPaymentState, type ProviderPaymentState } from '../integrations/razorpay';
 import { sendWhatsAppPdf, sendWhatsAppDocument, sendWhatsAppText } from '../integrations/whatsapp';
 import { makeReceipt } from './receipt';
@@ -29,7 +30,7 @@ export async function sendReceiptPdf(donationId: string): Promise<void> {
     paymentId: d.razorpayPaymentId, paidAt: d.paidAt, phone: d.user.phone,
   });
   try {
-    await sendWhatsAppPdf(d.user.phone, pdf, `${d.reference}.pdf`, `Donation receipt ${d.reference}`);
+    await sendWhatsAppPdf(d.user.phone, pdf, `${d.reference}.pdf`, t(normalizeLang(d.user.language), 'receipt_caption', { ref: d.reference }));
   } catch (uploadError) {
     console.error('[RECEIPT] PDF upload failed, falling back to link delivery:', (uploadError as any)?.message || uploadError);
     await sendWhatsAppDocument(d.user.phone, `${env.API_URL}/api/donations/${d.id}/receipt`, `${d.reference}.pdf`);
@@ -48,7 +49,7 @@ export async function deliverDonationReceipt(donationId: string): Promise<boolea
   const claim = await db.donation.updateMany({ where: { id: d.id, receiptSentAt: null }, data: { receiptSentAt: new Date() } });
   if (claim.count === 0) return false;
   try {
-    await sendWhatsAppText(d.user.phone, `Dhanyavaad! Aapka ₹${d.amount.toLocaleString('en-IN')} ka donation confirm ho gaya hai.\nReference: ${d.reference}\nAapki PDF receipt neeche bheji ja rahi hai.`);
+    await sendWhatsAppText(d.user.phone, t(normalizeLang(d.user.language), 'don_receipt_intro', { amount: d.amount.toLocaleString('en-IN'), ref: d.reference }));
     await sendReceiptPdf(d.id);
     return true;
   } catch (e: any) {

@@ -72,3 +72,17 @@ export function searchKnowledge(question: string, knowledge: string, opts: { max
   if (out.length > max) out = out.slice(0, max).replace(/\s+\S*$/, '') + '…';
   return out;
 }
+
+/** Title of the best matching knowledge section (used to pick a pre-translated answer for non-English customers). */
+export function bestSectionTitle(question: string, knowledge: string): string | null {
+  const sections = splitSections(knowledge);
+  const q = new Set<string>();
+  for (const w of words(question)) { if (STOP.has(w) || w.length < 2) continue; q.add(w); for (const syn of SYNONYMS[w] || []) q.add(syn); }
+  let best: { title: string; score: number } | null = null;
+  for (const sec of sections) {
+    const title = new Set(words(sec.title)); const body = new Set(words(sec.body));
+    let score = 0; for (const t of q) { if (title.has(t)) score += 3; if (body.has(t)) score += 1; }
+    if (score >= 2 && (!best || score > best.score)) best = { title: sec.title, score };
+  }
+  return best?.title ?? null;
+}

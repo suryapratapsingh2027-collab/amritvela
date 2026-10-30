@@ -5,7 +5,7 @@
  */
 
 export function normalize(s: string): string {
-  return s.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]+/g, ' ').trim();
+  return s.toLowerCase().replace(/[^a-z0-9\u0900-\u097f\u0a00-\u0a7f]+/g, ' ').trim();
 }
 
 export function tokens(s: string): string[] {
@@ -29,18 +29,22 @@ function editDistance(a: string, b: string, max: number): number {
 
 // ---------------------------------------------------------------- simple intents
 
-export const GREETING = /^(hi+|hello+|hey+|hlo|helo|namaste|namaskar|pranam|ram ram|jai shri ram|radhe radhe|sat sri akal|waheguru|good (?:morning|evening|afternoon)|नमस्ते|नमस्कार|हेलो|हैलो|प्रणाम|राम राम)(?: ji| g)?$/i;
+export const GREETING = /^(hi+|hello+|hey+|hlo|helo|namaste|namaskar|pranam|ram ram|jai shri ram|radhe radhe|sat sri akal|waheguru|good (?:morning|evening|afternoon)|नमस्ते|नमस्कार|हेलो|हैलो|हॅलो|हाय|प्रणाम|राम राम|ਸਤ ਸ੍ਰੀ ਅਕਾਲ|ਹੈਲੋ|ਨਮਸਤੇ|ਵਾਹਿਗੁਰੂ)(?: ji| g| जी| ਜੀ)?$/i;
 export function isGreeting(text: string): boolean { return GREETING.test(normalize(text)); }
 
-const CANCEL = /^(cancel|menu|start|start over|reset|stop|rehne do|rahne do|chhod do|chod do|band karo|nahi chahiye|nhi chahiye|क्लोज|रहने दो|कैंसल|मेनू)$/i;
+const CANCEL = /^(cancel|menu|start|start over|reset|stop|rehne do|rahne do|chhod do|chod do|band karo|nahi chahiye|nhi chahiye|क्लोज|रहने दो|कैंसल|रद्द|रद्द करें|रद्द करा|मेनू|मेन्यू|मुख्य मेनू|ਰੱਦ|ਮੀਨੂ|ਮੁੱਖ ਮੀਨੂ)$/i;
+const MENU_WORD = /^(menu|start|start over|reset|मेनू|मेन्यू|मुख्य मेनू|ਮੀਨੂ|ਮੁੱਖ ਮੀਨੂ)$/i;
+export function isMenuWord(text: string): boolean { return MENU_WORD.test(normalize(text)); }
+const LANGUAGE_WORD = /^(language|lang|change language|language badlein|bhasha|bhasha badlein|bhasa|भाषा|भाषा बदलें|भाषा बदला|ਭਾਸ਼ਾ|ਭਾਸ਼ਾ ਬਦਲੋ)$/i;
+export function isLanguageRequest(text: string): boolean { return LANGUAGE_WORD.test(normalize(text)); }
 export function isCancelOrMenu(text: string): boolean { return CANCEL.test(normalize(text)); }
 
-const YES = /^(haan|han|haa|ha|hanji|han ji|haan ji|yes|y|yep|ok|okay|ji|ji haan|bilkul|confirm|confirmed|sahi hai|theek hai|thik hai|done|हाँ|हां|हा|जी|ठीक है|सही है|कन्फर्म)$/i;
-const NO = /^(no|nahi|nahin|nhi|na|nope|galat|galat hai|cancel|नहीं|नही|ना|गलत)$/i;
+const YES = /^(haan|han|haa|ha|hanji|han ji|haan ji|yes|y|yep|ok|okay|ji|ji haan|bilkul|confirm|confirmed|sahi hai|theek hai|thik hai|done|हाँ|हां|हा|जी|ठीक है|सही है|कन्फर्म|हो|होय|बरोबर|ठीक आहे|ਹਾਂ|ਹਾਂ ਜੀ|ਹਾਂਜੀ|ਜੀ|ਠੀਕ ਹੈ|ਪੱਕਾ|पक्का|पक्का करें|निश्चित करा)$/i;
+const NO = /^(no|nahi|nahin|nhi|na|nope|galat|galat hai|cancel|नहीं|नही|ना|गलत|नाही|नको|ਨਹੀਂ|ਨਾ|ਗਲਤ)$/i;
 export function isYes(text: string): boolean { return YES.test(normalize(text)); }
 export function isNo(text: string): boolean { return NO.test(normalize(text)); }
 
-const NEGATION = new Set(['nahi', 'nahin', 'nhi', 'nai', 'mat', 'not', 'no', 'nahee', 'नहीं', 'नही', 'मत']);
+const NEGATION = new Set(['nahi', 'nahin', 'nhi', 'nai', 'mat', 'not', 'no', 'nahee', 'नहीं', 'नही', 'मत', 'नाही', 'नको', 'ਨਹੀਂ']);
 const PRE_NEGATION = new Set(['not', 'no', 'bina', 'except', 'without']);
 
 // ---------------------------------------------------------------- product matching
@@ -123,10 +127,10 @@ export function parseExplicitQuantity(text: string): number | null {
   return m ? Math.min(100, Math.max(1, Number(m[1]))) : null;
 }
 
-const BUY = /(?:^|[^a-z])(kharid\w*|khareed\w*|order|buy|purchase|chahiye|chahie|chaiye|chahiyen|lena|leni|lene|mangwa\w*|mangna|le\s*lo|dedo|de\s*do|book)(?:$|[^a-z])|खरीद|ऑर्डर|चाहिए|लेना|मंगवा/i;
+const BUY = /(?:^|[^a-z])(kharid\w*|khareed\w*|order|buy|purchase|chahiye|chahie|chaiye|chahiyen|lena|leni|lene|mangwa\w*|mangna|le\s*lo|dedo|de\s*do|book)(?:$|[^a-z])|खरीद|ऑर्डर|चाहिए|लेना|मंगवा|खरेदी|हवे|हवी|ਖਰੀਦ|ਆਰਡਰ|ਚਾਹੀਦਾ|ਚਾਹੀਦੀ/i;
 const PRICE = /(?:^|[^a-z])(price|rate|kitne|kitna|kitni|kimat|keemat|cost|daam|dam|bhaav|bhav)(?:$|[^a-z])|कीमत|दाम|भाव|कितने|कितना/i;
 const CATALOG = /(?:^|[^a-z])(products?|catalog|catalogue|saman|samaan|shop|store|dukan|price\s*list|rate\s*list|what\s*do\s*you\s*sell)(?:$|[^a-z])|प्रोडक्ट|सामान|दुकान/i;
-const PHOTO = /(?:^|[^a-z])(photo|photos|image|images|pic|pics|picture|pictures|tasveer|tasvir|dikhao|dikha|dikhana|dekhna|dekhni|dikhaiye)(?:$|[^a-z])|फोटो|तस्वीर|दिखाओ|दिखा/i;
+const PHOTO = /(?:^|[^a-z])(photo|photos|image|images|pic|pics|picture|pictures|tasveer|tasvir|dikhao|dikha|dikhana|dekhna|dekhni|dikhaiye)(?:$|[^a-z])|फोटो|तस्वीर|दिखाओ|दिखा|दाखवा|ਫੋਟੋ|ਤਸਵੀਰ|ਦਿਖਾਓ/i;
 export function hasPhotoIntent(text: string): boolean { return PHOTO.test(text); }
 export function hasBuyIntent(text: string): boolean { return BUY.test(text); }
 export function hasPriceIntent(text: string): boolean { return PRICE.test(text); }
@@ -134,7 +138,7 @@ export function hasCatalogIntent(text: string): boolean { return CATALOG.test(te
 
 // ---------------------------------------------------------------- donation / payment intents
 
-const DONATION_WORDS = /(?:^|[^a-z])(donat\w*|daan|chanda|contribut\w*|yogdaan|seva\s*rashi)(?:$|[^a-z])|दान|योगदान|चंदा|चन्दा/i;
+const DONATION_WORDS = /(?:^|[^a-z])(donat\w*|daan|chanda|contribut\w*|yogdaan|seva\s*rashi)(?:$|[^a-z])|दान|योगदान|चंदा|चन्दा|देणगी|ਦਾਨ|ਚੰਦਾ/i;
 export function hasDonationIntent(text: string): boolean { return DONATION_WORDS.test(text); }
 
 export const MIN_DONATION = 1;
@@ -164,7 +168,7 @@ export function parseAmount(text: string, opts: { allowBare?: boolean } = {}): A
   return { amount: value };
 }
 
-const RECEIPT_WORDS = /receipt|rasid|raseed|rasid|रसीद|invoice|bill/i;
+const RECEIPT_WORDS = /receipt|rasid|raseed|rasid|रसीद|पावती|ਰਸੀਦ|invoice/i;
 const PAY_WORDS = /(?:^|[^a-z])(payment|pay|paid|donation|donate|daan|paisa|paise|paisey|transfer|link|amount)(?:$|[^a-z])|दान|पेमेंट|भुगतान|पैसे/i;
 const DONE_WORDS = /kar\s*diya|kardiya|kar\s*di\b|kardi\b|kr\s*diya|de\s*diya|dediya|de\s*di\b|ho\s*gaya|hogaya|ho\s*gya|hogya|ho\s*chuka|complete|completed|success|successful|bhej\s*diya|bhej\s*di\b|kar\s*chuka|kar\s*chuki|done|paid|कर\s*दिया|कर\s*दी|दे\s*दिया|हो\s*गया|भेज\s*दिया|भेज\s*दी/i;
 
@@ -183,7 +187,7 @@ export function extractOrderRef(text: string): string | null { return text.match
 const TRACK_WORDS = /(?:^|[^a-z])(track\w*|status|shipment|awb|parcel|delivery\s*status|(?:order|parcel|package|saman|samaan)\s+(?:kahan|kaha|kab)|kab\s*aayega|kab\s*tak\s*aayega)(?:$|[^a-z])|ट्रैक|स्टेटस/i;
 export function hasTrackIntent(text: string): boolean { return TRACK_WORDS.test(text); }
 
-const HUMAN = /(?:^|[^a-z])(human|agent|representative|customer\s*care|insaan|manushya|operator)(?:$|[^a-z])|kisi\s*se\s*baat|baat\s*karni|support\s*team|talk\s*to\s*(?:someone|a\s*person)|इंसान|किसी\s*से\s*बात|सपोर्ट/i;
+const HUMAN = /(?:^|[^a-z])(human|agent|representative|customer\s*care|insaan|manushya|operator)(?:$|[^a-z])|kisi\s*se\s*baat|baat\s*karni|support\s*team|talk\s*to\s*(?:someone|a\s*person)|इंसान|किसी\s*से\s*बात|सपोर्ट|टीम\s*से\s*बात|टीमशी|ਟੀਮ\s*ਨਾਲ|ਇਨਸਾਨ/i;
 export function hasHumanIntent(text: string): boolean { return HUMAN.test(text); }
 
 // ---------------------------------------------------------------- address
@@ -192,15 +196,15 @@ export function extractPin(text: string): string | null {
   return text.match(/(?<!\d)([1-9]\d{5})(?!\d)/)?.[1] ?? null;
 }
 
-export type AddressCheck = { ok: true; address: string; pin: string } | { ok: false; reason: string };
+export type AddressCheck = { ok: true; address: string; pin: string } | { ok: false; reason: 'addr_no_pin' | 'addr_short' | 'addr_long' };
 
 export function validateAddress(text: string): AddressCheck {
   const address = text.replace(/\s+/g, ' ').trim();
   const pin = extractPin(address);
-  if (!pin) return { ok: false, reason: 'Address mein 6-digit PIN code nahi mila. Kripya poora address aur PIN code ek message mein bhejein.' };
+  if (!pin) return { ok: false, reason: 'addr_no_pin' };
   const words = address.split(' ').filter(Boolean);
-  if (address.length < 15 || words.length < 3) return { ok: false, reason: 'Address bahut chhota hai. Kripya ghar/gali, area/city, state aur PIN code ke saath poora address bhejein.' };
-  if (address.length > 400) return { ok: false, reason: 'Address bahut lamba hai. Kripya sirf delivery address bhejein.' };
+  if (address.length < 15 || words.length < 3) return { ok: false, reason: 'addr_short' };
+  if (address.length > 400) return { ok: false, reason: 'addr_long' };
   return { ok: true, address, pin };
 }
 
@@ -209,6 +213,6 @@ export function validateName(text: string): { ok: true; name: string } | { ok: f
   if (name.length < 2 || name.length > 60) return { ok: false };
   if (/\d/.test(name)) return { ok: false };
   if (isYes(name) || isNo(name) || isCancelOrMenu(name) || isGreeting(name)) return { ok: false };
-  if (!/[a-z\u0900-\u097f]/i.test(name)) return { ok: false };
+  if (!/[a-z\u0900-\u097f\u0a00-\u0a7f]/i.test(name)) return { ok: false };
   return { ok: true, name };
 }

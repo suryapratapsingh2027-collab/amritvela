@@ -196,36 +196,53 @@ describe('AccountSettings', () => {
 });
 
 describe('Assistant widget (website chat)', () => {
-  it('asks for name + 10-digit number first, then chats via the real assistant API (no order-id prompt)', async () => {
-    routes['POST /api/assistant'] = (b) => ({ json: { conversationId: 'conv1', mode: 'AI', text: `Nariyal x 1 — ₹100.\nDelivery ke liye apna poora address bhejein. Pay: https://rzp.io/rzp/abc.`, image: { url: 'https://img/n.jpg' }, now: new Date().toISOString() } });
-    routes['GET /api/assistant/poll'] = () => ({ json: { mode: 'AI', messages: [], now: new Date().toISOString() } });
+  const now = () => new Date().toISOString();
+  const langChips = [{ id: 'lang:en', title: 'English' }, { id: 'lang:hi', title: 'हिन्दी (Hindi)' }, { id: 'lang:hing', title: 'Hinglish' }, { id: 'lang:pa', title: 'ਪੰਜਾਬੀ (Punjabi)' }, { id: 'lang:mr', title: 'मराठी (Marathi)' }];
+
+  it('asks for name + 10-digit number, then the bot greets with the language picker; tapping a chip sends its replyId', async () => {
+    routes['POST /api/assistant'] = (b) => {
+      if (b.replyId === 'lang:hi') return { json: { conversationId: 'conv1', mode: 'AI', text: 'भाषा हिन्दी चुन ली गई है ✅\n\nमैं आपकी क्या सहायता कर सकता हूँ?', options: [{ id: 'menu:donate', title: 'दान करें' }, { id: 'menu:products', title: 'हमारे उत्पाद' }], now: now() } };
+      if (b.message === 'Nariyal order') return { json: { conversationId: 'conv1', mode: 'AI', text: 'Nariyal x 1 — ₹100.\nPay: https://rzp.io/rzp/abc.', image: { url: 'https://img/n.jpg' }, options: null, now: now() } };
+      return { json: { conversationId: 'conv1', mode: 'AI', text: 'Namaste! Welcome to Amrit Vela Trust.\nPlease select your preferred language.', options: langChips, now: now() } };
+    };
+    routes['GET /api/assistant/poll'] = () => ({ json: { mode: 'AI', messages: [], now: now() } });
     render(<Assistant floating={false} />);
-    await userEvent.type(screen.getByPlaceholderText('Aapka naam'), 'Surya');
+    await userEvent.type(screen.getByPlaceholderText('Your name'), 'Surya');
     await userEvent.type(screen.getByPlaceholderText('10-digit mobile number'), '12345');
-    await userEvent.click(screen.getByRole('button', { name: /chat shuru karein/i }));
+    await userEvent.click(screen.getByRole('button', { name: /start chat/i }));
     expect(screen.getByRole('alert')).toHaveTextContent(/10-digit/);
     await userEvent.clear(screen.getByPlaceholderText('10-digit mobile number')); await userEvent.type(screen.getByPlaceholderText('10-digit mobile number'), '+91 98765 00001');
-    await userEvent.click(screen.getByRole('button', { name: /chat shuru karein/i }));
-    const box = await screen.findByPlaceholderText('Apna sawaal likhein…');
-    await userEvent.type(box, 'Nariyal kharidna hai{Enter}');
+    await userEvent.click(screen.getByRole('button', { name: /start chat/i }));
+    // the first message is the bot's own welcome + language chips (sent silently as "hello")
+    expect(await screen.findByText(/Welcome to Amrit Vela Trust/)).toBeInTheDocument();
+    expect(calls.find((c) => c.url === '/api/assistant')!.body).toMatchObject({ phone: '9876500001', name: 'Surya', message: 'hello' });
+    for (const l of ['English', 'हिन्दी (Hindi)', 'Hinglish', 'ਪੰਜਾਬੀ (Punjabi)', 'मराठी (Marathi)']) expect(screen.getByRole('button', { name: l })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'हिन्दी (Hindi)' }));
+    expect(await screen.findByText(/भाषा हिन्दी चुन ली गई है/)).toBeInTheDocument();
+    expect(calls.filter((c) => c.url === '/api/assistant').at(-1)!.body).toMatchObject({ message: 'हिन्दी (Hindi)', replyId: 'lang:hi' });
+    expect(screen.getByRole('button', { name: 'दान करें' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Hinglish' })).toBeNull(); // old chips disappear once used
+    await userEvent.type(screen.getByPlaceholderText('Type your message…'), 'Nariyal order{Enter}');
     const link = await screen.findByRole('link', { name: 'https://rzp.io/rzp/abc' });
     expect(link).toHaveAttribute('target', '_blank');
-    expect(calls.find((c) => c.url === '/api/assistant')!.body).toMatchObject({ phone: '9876500001', name: 'Surya', message: 'Nariyal kharidna hai' });
     expect(document.querySelector('img[src="https://img/n.jpg"]')).toBeTruthy();
     expect(localStorage.getItem('trust_chat_conversation')).toBe('conv1');
   });
 
   it('shows the human-handover note, and an admin reply that arrives by polling (no duplicates)', async () => {
     localStorage.setItem('trust_chat_profile', JSON.stringify({ name: 'S', phone: '9876500001' }));
-    routes['POST /api/assistant'] = () => ({ json: { conversationId: 'c9', mode: 'HUMAN', held: true, text: '', now: new Date().toISOString() } });
+    localStorage.setItem('trust_chat_conversation', 'c9');
+    routes['GET /api/assistant/history'] = () => ({ json: { mode: 'AI', now: now(), messages: [{ id: 'h1', role: 'assistant', text: 'Hi again', createdAt: now() }] } });
+    routes['POST /api/assistant'] = () => ({ json: { conversationId: 'c9', mode: 'HUMAN', held: true, text: '', now: now() } });
     let n = 0;
-    routes['GET /api/assistant/poll'] = () => ({ json: { mode: 'HUMAN', now: new Date().toISOString(), messages: n++ < 5 ? [{ id: 'adm1', text: 'Namaste, main yahan hoon.', createdAt: new Date().toISOString() }] : [] } });
+    routes['GET /api/assistant/poll'] = () => ({ json: { mode: 'HUMAN', now: now(), messages: n++ < 5 ? [{ id: 'adm1', text: 'Namaste, main yahan hoon.', createdAt: now() }] : [] } });
     vi.useFakeTimers({ shouldAdvanceTime: true });
     render(<Assistant floating={false} />);
-    const box = await screen.findByPlaceholderText('Apna sawaal likhein…');
+    expect(await screen.findByText('Hi again')).toBeInTheDocument();
+    const box = await screen.findByPlaceholderText('Type your message…');
     fireEvent.change(box, { target: { value: 'koi hai?' } });
     fireEvent.submit(box.closest('form')!);
-    expect(await screen.findByText(/Trust team ko mil gaya/)).toBeInTheDocument();
+    expect(await screen.findByText(/reached the Trust team/)).toBeInTheDocument();
     await vi.advanceTimersByTimeAsync(7100); await vi.advanceTimersByTimeAsync(7100);
     expect(await screen.findAllByText('Namaste, main yahan hoon.')).toHaveLength(1);
     vi.useRealTimers();
@@ -233,13 +250,15 @@ describe('Assistant widget (website chat)', () => {
 
   it('shows the API message for 4xx and a friendly line when the server is down', async () => {
     localStorage.setItem('trust_chat_profile', JSON.stringify({ name: 'S', phone: '9876500001' }));
+    localStorage.setItem('trust_chat_conversation', 'c1');
+    routes['GET /api/assistant/history'] = () => ({ json: { mode: 'AI', now: now(), messages: [{ id: 'h1', role: 'assistant', text: 'Hello', createdAt: now() }] } });
     routes['POST /api/assistant'] = () => ({ status: 429, json: { error: 'Bahut zyada messages. Thodi der baad try karein.' } });
     render(<Assistant floating={false} />);
-    await userEvent.type(await screen.findByPlaceholderText('Apna sawaal likhein…'), 'hi{Enter}');
+    await userEvent.type(await screen.findByPlaceholderText('Type your message…'), 'hi{Enter}');
     expect(await screen.findByText(/Bahut zyada messages/)).toBeInTheDocument();
     routes['POST /api/assistant'] = () => ({ status: 500, json: { error: 'boom internal' } });
-    await userEvent.type(screen.getByPlaceholderText('Apna sawaal likhein…'), 'hello{Enter}');
-    expect(await screen.findByText(/connect nahi ho paaya/)).toBeInTheDocument();
+    await userEvent.type(screen.getByPlaceholderText('Type your message…'), 'hello{Enter}');
+    expect(await screen.findByText(/Could not connect to the assistant/)).toBeInTheDocument();
     expect(screen.queryByText(/boom internal/)).toBeNull();
   });
 });

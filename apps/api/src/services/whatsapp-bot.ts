@@ -12,23 +12,26 @@
 import { Prisma } from '@prisma/client';
 import { db } from '../db';
 import { env } from '../config';
-import { sendWhatsAppText, toWhatsAppImageUrl } from '../integrations/whatsapp';
+import { sendWhatsAppText, toWhatsAppImageUrl, type InteractiveSpec } from '../integrations/whatsapp';
 import { createOrderPaymentLink } from '../integrations/razorpay';
 import { createDonationLink } from './donation-payment-link';
 import { reconcileDonation, reconcileOrder, sendReceiptPdf } from './payments';
 import { sendOrderInvoice } from './fulfillment';
 import { isSellable, money, shippingFor } from './pricing';
+import { M } from '../i18n/messages';
+import { DEFAULT_LANG, LANGS, LANG_TITLES, isLang, normalizeLang, t, type Lang, type MessageKey } from '../i18n';
 import {
   MAX_DONATION, extractDonationRef, extractOrderRef, extractPin, findProducts, hasBuyIntent, hasCatalogIntent,
-  hasDonationIntent, hasHumanIntent, hasPhotoIntent, hasPriceIntent, hasTrackIntent, isCancelOrMenu, isGreeting, isNo,
+  hasDonationIntent, hasHumanIntent, hasPhotoIntent, hasPriceIntent, hasTrackIntent, isCancelOrMenu, isGreeting, isLanguageRequest, isMenuWord, isNo,
   isPaymentClaim, isReceiptRequest, isYes, parseAmount, parseExplicitQuantity, parseQuantity, validateAddress, validateName,
 } from './bot-nlp';
 
-const SUPPORT = 'Agar dikkat aaye to Trust team se 6913001300 par sampark karein.';
 const STATE_TTL_MS = 30 * 60 * 1000;
 
-export type BotReply = { text: string; intent: string; image?: { url: string; caption: string }; after?: () => Promise<void> };
-type Ctx = { phone: string; text: string; conversationId: string; channel?: 'whatsapp' | 'web' };
+export type BotReply = { text: string; intent: string; image?: { url: string; caption: string }; interactive?: InteractiveSpec; after?: () => Promise<void> };
+/** `replyId` is set when the customer tapped a list row / button (e.g. "menu:donate", "lang:pa", "prod:<id>", "cfm:yes"). */
+export type RouteInput = { phone: string; text: string; conversationId: string; channel?: 'whatsapp' | 'web'; replyId?: string };
+type Ctx = RouteInput & { lang: Lang; langChosen: boolean };
 
 type State =
   | { step: 'AWAIT_PRODUCT'; at: number }
@@ -39,6 +42,9 @@ type State =
   | { step: 'AWAIT_DONATION_NAME'; at: number; amount: number };
 
 type ProductRow = { id: string; name: string; slug: string; price: number; stock: number; active: boolean; currency: string; imageUrl: string | null };
+
+/** Translate in the customer's language; {support} is always available. */
+const T = (c: Pick<Ctx, 'lang'>, key: MessageKey, vars: Record<string, string | number> = {}) => t(c.lang, key, { support: t(c.lang, 'support'), ...vars });
 
 function productImage(p: ProductRow): BotReply['image'] {
   const url = toWhatsAppImageUrl(p.imageUrl);
@@ -66,51 +72,133 @@ async function loadProducts(): Promise<ProductRow[]> {
   return rows.filter(isSellable);
 }
 
-/* ------------------------------------------------------------------ canned texts */
+/* ------------------------------------------------------------------ menus (interactive messages) */
 
-const MENU = 'Namaste! Amrit Vela Trust mein aapka swagat hai. 🙏\n\nMain in cheezon mein madad kar sakta hoon:\n• Donation — likhein "Donation 500"\n• Product order — likhein "Nariyal kharidna hai" ya "products"\n• Donation receipt — likhein "receipt"\n• Order status — apna order number (ORD-...) bhejein\n• Trust ke baare mein koi bhi sawaal\n\nKisi insaan se baat karni ho to "human" likhein.';
+const list = (c: Ctx, intent: string, spec: Omit<Extract<InteractiveSpec, { kind: 'list' }>, 'kind'>): BotReply => ({ intent, text: spec.body, interactive: { kind: 'list', ...spec } });
+const buttons = (intent: string, body: string, btns: { id: string; title: string }[]): BotReply => ({ intent, text: body, interactive: { kind: 'buttons', body, buttons: btns } });
 
-/** Stock numbers are never shown to customers: a product is either orderable or it is "not in stock". */
-const stockNote = (p: ProductRow) => (p.stock > 0 ? '' : ' — abhi stock mein nahi hai');
-
-function productList(products: ProductRow[]): string {
-  const available = products.filter((p) => p.stock > 0);
-  if (!available.length) return `Abhi koi product order ke liye available nahi hai. ${SUPPORT}`;
-  return 'Aap kaunsa product order karna chahte hain?\n' +
-    available.map((p) => `• ${p.name} — ${money(p.price)}`).join('\n') +
-    '\n\nProduct ka naam bhejein, jaise "' + available[0].name + '". Kisi product ki photo ke liye "' + available[0].name + ' photo" likhein. Cancel karne ke liye "cancel" likhein.';
+function socialLinks(): string[] {
+  const out: string[] = [];
+  if (env.TRUST_YOUTUBE_URL) out.push(`▶️ YouTube: ${env.TRUST_YOUTUBE_URL}`);
+  if (env.TRUST_FACEBOOK_URL) out.push(`📘 Facebook: ${env.TRUST_FACEBOOK_URL}`);
+  if (env.TRUST_INSTAGRAM_URL) out.push(`📸 Instagram: ${env.TRUST_INSTAGRAM_URL}`);
+  if (env.TRUST_WHATSAPP_COMMUNITY_URL) out.push(`💬 WhatsApp: ${env.TRUST_WHATSAPP_COMMUNITY_URL}`);
+  return out;
 }
 
-const ORDER_STATUS_TEXT: Record<string, string> = {
-  PENDING_PAYMENT: 'Payment ka intezaar', CONFIRMED: 'Confirm (payment mil gaya)', PROCESSING: 'Taiyaar ho raha hai',
-  SHIPPED: 'Ship ho chuka hai', OUT_FOR_DELIVERY: 'Delivery ke liye nikla hai', DELIVERED: 'Deliver ho chuka hai', CANCELLED: 'Cancel',
-};
+/** First message of a new conversation: welcome + language list (shown in all scripts, since the language is not known yet). */
+function languageMenu(c: Ctx): BotReply {
+  return list(c, 'LANGUAGE', {
+    header: 'Amrit Vela Trust', body: t('en', 'lang_welcome_body'), button: t('en', 'lang_button'),
+    sections: [{ title: 'Language / भाषा', rows: LANGS.map((l) => ({ id: `lang:${l}`, title: LANG_TITLES[l] })) }],
+  });
+}
+
+function mainMenu(c: Ctx, prefix?: string): BotReply {
+  const trust = [
+    { id: 'menu:info', title: T(c, 'm_info'), description: T(c, 'm_info_d') },
+    { id: 'menu:donate', title: T(c, 'm_donate'), description: T(c, 'm_donate_d') },
+    { id: 'menu:contact', title: T(c, 'm_contact') },
+  ];
+  if (socialLinks().length) trust.push({ id: 'menu:social', title: T(c, 'm_social') });
+  return list(c, 'MENU', {
+    body: `${prefix ? `${prefix}\n\n` : ''}${T(c, 'menu_body')}`, button: T(c, 'menu_button'),
+    sections: [
+      { title: T(c, 'sec_trust'), rows: trust },
+      { title: T(c, 'sec_shop'), rows: [
+        { id: 'menu:products', title: T(c, 'm_products'), description: T(c, 'm_products_d') },
+        { id: 'menu:status', title: T(c, 'm_status') },
+        { id: 'menu:receipt', title: T(c, 'm_receipt') },
+      ] },
+      { title: T(c, 'sec_help'), rows: [
+        { id: 'menu:human', title: T(c, 'm_human') },
+        { id: 'menu:lang', title: T(c, 'm_lang') },
+      ] },
+    ],
+  });
+}
+
+const TOPICS = ['about', 'kirtan', 'dharamshala', 'medical', 'achievements', 'plans'] as const;
+type Topic = (typeof TOPICS)[number];
+
+function topicsMenu(c: Ctx): BotReply {
+  return list(c, 'INFO', {
+    body: T(c, 'info_body'), button: T(c, 'info_button'),
+    sections: [{ title: T(c, 'info_section'), rows: TOPICS.map((k) => ({ id: `info:${k}`, title: T(c, `t_${k}` as MessageKey) })) }],
+  });
+}
+
+function topicReply(c: Ctx, topic: Topic): BotReply {
+  return buttons('INFO', `${T(c, `tx_${topic}` as MessageKey)}\n\n${T(c, 'after_topic')}`, [
+    { id: 'menu:donate', title: T(c, 'b_donate') }, { id: 'menu:info', title: T(c, 'b_more') }, { id: 'menu:main', title: T(c, 'b_menu') },
+  ]);
+}
+
+function contactReply(c: Ctx): BotReply {
+  const social = socialLinks();
+  return buttons('CONTACT', `${T(c, 'tx_contact')}${social.length ? `\n\n${social.join('\n')}` : ''}`, [
+    { id: 'menu:donate', title: T(c, 'b_donate') }, { id: 'menu:info', title: T(c, 'b_more') }, { id: 'menu:main', title: T(c, 'b_menu') },
+  ]);
+}
+
+function socialReply(c: Ctx): BotReply {
+  const social = socialLinks();
+  if (!social.length) return { intent: 'SOCIAL', text: T(c, 'social_none') };
+  return buttons('SOCIAL', `${T(c, 'tx_social')}\n\n${social.join('\n')}`, [{ id: 'menu:main', title: T(c, 'b_menu') }]);
+}
+
+const DONATION_AMOUNTS = [101, 501, 1100, 2100, 5100];
+function donationMenu(c: Ctx): BotReply {
+  return list(c, 'DONATION_AMOUNT', {
+    body: T(c, 'donate_body'), button: T(c, 'donate_button'),
+    sections: [{ title: T(c, 'donate_section'), rows: [...DONATION_AMOUNTS.map((a) => ({ id: `amt:${a}`, title: `₹${a.toLocaleString('en-IN')}` })), { id: 'amt:other', title: T(c, 'amt_other') }] }],
+  });
+}
+
+function productMenu(c: Ctx, products: ProductRow[]): BotReply {
+  const available = products.filter((p) => p.stock > 0);
+  if (!available.length) return { intent: 'SHOP', text: T(c, 'no_products') };
+  return list(c, 'SHOP', {
+    body: T(c, 'product_list_body'), button: T(c, 'product_list_button'), footer: T(c, 'product_footer', { name: available[0].name }),
+    sections: [{ title: T(c, 'product_list_section'), rows: available.map((p) => ({ id: `prod:${p.id}`, title: p.name, description: money(p.price) })) }],
+  });
+}
+
+const stockHint = (c: Ctx, p: ProductRow) => (p.stock > 0 ? T(c, 'price_ok', { name: p.name, price: money(p.price) }) : T(c, 'price_out', { name: p.name, price: money(p.price) }));
 
 /* ------------------------------------------------------------------ main router */
 
 /**
  * Returns a reply for transactional/known intents, or null when the message should go to the grounded AI.
  */
-export async function routeWhatsAppMessage(ctx: Ctx): Promise<BotReply | null> {
-  const text = ctx.text.trim();
-  const state = await readState(ctx.conversationId);
+export async function routeWhatsAppMessage(input: RouteInput): Promise<BotReply | null> {
+  const user = await db.user.findUnique({ where: { phone: input.phone }, select: { language: true } });
+  const chosen = normalizeLang(user?.language);
+  const c: Ctx = { ...input, lang: chosen ?? DEFAULT_LANG, langChosen: Boolean(chosen) };
+  const text = input.text.trim();
+
+  // Taps on list rows / buttons carry an id and are handled before any text guessing.
+  if (input.replyId) {
+    const reply = await handleReplyId(c, input.replyId);
+    if (reply) return reply;
+  }
+
+  const state = await readState(c.conversationId);
   const inConfirm = state?.step === 'AWAIT_CONFIRM';
 
-  if (hasHumanIntent(text)) {
-    await writeState(ctx.conversationId, null);
-    return { intent: 'HUMAN', text: 'Aapki request Trust team ko note kar li gayi hai. Team jaldi aapse sampark karegi. Aap seedha 6913001300 ya amritvelatrustlive@gmail.com par bhi sampark kar sakte hain.\n\nBot par wapas aane ke liye "menu" likhein.' };
+  if (hasHumanIntent(text)) return humanReply(c);
+
+  if (isLanguageRequest(text)) { await writeState(c.conversationId, null); return languageMenu(c); }
+
+  if (isMenuWord(text) || isGreeting(text)) {
+    await writeState(c.conversationId, null);
+    return c.langChosen ? mainMenu(c) : languageMenu(c);
   }
 
   if (isCancelOrMenu(text) || (inConfirm && isNo(text))) {
     const wasActive = Boolean(state);
-    await writeState(ctx.conversationId, null);
-    if (/^(menu|start|start over|reset)$/i.test(text.toLowerCase().trim())) return { intent: 'MENU', text: MENU };
-    return { intent: 'CANCEL', text: wasActive ? 'Theek hai, maine ye process cancel kar diya hai. Kuch aur chahiye to "menu" likhein.' : MENU };
-  }
-
-  if (isGreeting(text)) {
-    await writeState(ctx.conversationId, null);
-    return { intent: 'GREETING', text: MENU };
+    await writeState(c.conversationId, null);
+    return wasActive ? { intent: 'CANCEL', text: T(c, 'cancelled_ok') } : mainMenu(c);
   }
 
   // Payment claims / receipt requests / explicit references. Never swallowed by a stale checkout state.
@@ -119,74 +207,153 @@ export async function routeWhatsAppMessage(ctx: Ctx): Promise<BotReply | null> {
   if (!addressInProgress && !confirmingAnswer) {
     const donRef = extractDonationRef(text);
     const ordRef = extractOrderRef(text);
-    const purchaseVerb = /kharid|khareed|buy|purchase|chahiye|chaiye|lena|mangwa|खरीद|चाहिए/i.test(text);
+    const purchaseVerb = /kharid|khareed|buy|purchase|chahiye|chaiye|lena|mangwa|खरीद|चाहिए|खरेदी|हवे|ਖਰੀਦ|ਚਾਹੀਦਾ/i.test(text);
     if (isReceiptRequest(text) || isPaymentClaim(text) || donRef || ordRef || (hasTrackIntent(text) && !purchaseVerb)) {
-      const reply = await handlePaymentQuery(ctx, text, { donRef, ordRef });
+      const reply = await handlePaymentQuery(c, text, { donRef, ordRef });
       if (reply) return reply;
     }
   }
 
   if (state) {
-    const reply = await handleState(ctx, text, state);
+    const reply = await handleState(c, text, state);
     if (reply) return reply;
   }
 
-  if (hasDonationIntent(text)) return handleDonationStart(ctx, text);
+  if (hasDonationIntent(text)) return handleDonationStart(c, text);
 
-  return handleShop(ctx, text);
+  return handleShop(c, text);
+}
+
+function humanReply(c: Ctx): BotReply {
+  void writeState(c.conversationId, null);
+  return { intent: 'HUMAN', text: T(c, 'human_ack') };
+}
+
+/* ------------------------------------------------------------------ taps on list rows / buttons */
+
+async function handleReplyId(c: Ctx, id: string): Promise<BotReply | null> {
+  const i = id.indexOf(':');
+  const kind = i < 0 ? id : id.slice(0, i);
+  const arg = i < 0 ? '' : id.slice(i + 1);
+
+  switch (kind) {
+    case 'lang': {
+      if (!isLang(arg)) return null;
+      await db.user.update({ where: { phone: c.phone }, data: { language: arg } });
+      await writeState(c.conversationId, null);
+      const next: Ctx = { ...c, lang: arg, langChosen: true };
+      return mainMenu(next, t(arg, 'lang_set'));
+    }
+    case 'menu': {
+      switch (arg) {
+        case 'main': await writeState(c.conversationId, null); return mainMenu(c);
+        case 'info': await writeState(c.conversationId, null); return topicsMenu(c);
+        case 'contact': await writeState(c.conversationId, null); return contactReply(c);
+        case 'social': await writeState(c.conversationId, null); return socialReply(c);
+        case 'lang': await writeState(c.conversationId, null); return languageMenu(c);
+        case 'human': return humanReply(c);
+        case 'donate': await writeState(c.conversationId, null); return donationMenu(c);
+        case 'products': {
+          await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now() });
+          return productMenu(c, await loadProducts());
+        }
+        case 'status': return (await handlePaymentQuery(c, 'order status', { donRef: null, ordRef: null })) ?? { intent: 'PAYMENT_NONE', text: T(c, 'pay_none') };
+        case 'receipt': return (await handlePaymentQuery(c, 'receipt', { donRef: null, ordRef: null })) ?? { intent: 'PAYMENT_NONE', text: T(c, 'pay_none') };
+      }
+      return null;
+    }
+    case 'info': {
+      if (!(TOPICS as readonly string[]).includes(arg)) return null;
+      await writeState(c.conversationId, null);
+      return topicReply(c, arg as Topic);
+    }
+    case 'amt': {
+      if (arg === 'other') {
+        await writeState(c.conversationId, { step: 'AWAIT_DONATION_AMOUNT', at: Date.now() });
+        return { intent: 'DONATION_AMOUNT', text: T(c, 'donate_ask_amount') };
+      }
+      const amount = Number(arg);
+      if (!DONATION_AMOUNTS.includes(amount)) return null;
+      return donationWithAmount(c, amount);
+    }
+    case 'prod': {
+      const product = (await loadProducts()).find((p) => p.id === arg);
+      if (!product) return { intent: 'SHOP', text: T(c, 'product_not_found') };
+      return startCheckout(c, product, 1);
+    }
+    case 'cfm': {
+      const state = await readState(c.conversationId);
+      if (state?.step !== 'AWAIT_CONFIRM') return mainMenu(c); // stale button from an expired session
+      if (arg === 'yes') {
+        const product = (await loadProducts()).find((p) => p.id === state.productId);
+        if (!product) { await writeState(c.conversationId, null); return { intent: 'SHOP', text: T(c, 'product_not_found') }; }
+        return placeOrder(c, state, product);
+      }
+      if (arg === 'addr') {
+        await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: state.productId, quantity: state.quantity });
+        return { intent: 'SHOP', text: T(c, 'new_address') };
+      }
+      await writeState(c.conversationId, null);
+      return { intent: 'CANCEL', text: T(c, 'cancelled_ok') };
+    }
+  }
+  return null;
 }
 
 /* ------------------------------------------------------------------ donations */
 
-async function handleDonationStart(ctx: Ctx, text: string, allowBare = false): Promise<BotReply> {
-  const parsed = parseAmount(text, { allowBare });
-  if (parsed.amount == null) {
-    if (parsed.reason === 'decimal') return { intent: 'DONATION_AMOUNT', text: 'Kripya poore rupaye mein amount bhejein, jaise ₹500.' };
-    if (parsed.reason === 'range') return { intent: 'DONATION_AMOUNT', text: `Donation amount ₹1 se ₹${MAX_DONATION.toLocaleString('en-IN')} ke beech hona chahiye. Kripya sahi amount bhejein.` };
-    await writeState(ctx.conversationId, { step: 'AWAIT_DONATION_AMOUNT', at: Date.now() });
-    return { intent: 'DONATION_AMOUNT', text: 'Amrit Vela Trust ko donation dene ke liye kitni rakam donate karna chahte hain? Kripya amount bhejein, jaise ₹500.' };
-  }
-  const user = await db.user.findUnique({ where: { phone: ctx.phone } });
+async function donationWithAmount(c: Ctx, amount: number): Promise<BotReply> {
+  const user = await db.user.findUnique({ where: { phone: c.phone } });
   if (!user?.name) {
-    await writeState(ctx.conversationId, { step: 'AWAIT_DONATION_NAME', at: Date.now(), amount: parsed.amount });
-    return { intent: 'DONATION_NAME', text: `₹${parsed.amount.toLocaleString('en-IN')} donation ke liye dhanyavaad! Receipt par naam likhne ke liye apna poora naam bhejein.` };
+    await writeState(c.conversationId, { step: 'AWAIT_DONATION_NAME', at: Date.now(), amount });
+    return { intent: 'DONATION_NAME', text: T(c, 'donate_ask_name', { amount: amount.toLocaleString('en-IN') }) };
   }
-  return createDonationReply(ctx, parsed.amount);
+  return createDonationReply(c, amount);
 }
 
-async function createDonationReply(ctx: Ctx, amount: number): Promise<BotReply> {
-  await writeState(ctx.conversationId, null);
+async function handleDonationStart(c: Ctx, text: string, allowBare = false): Promise<BotReply> {
+  const parsed = parseAmount(text, { allowBare });
+  if (parsed.amount == null) {
+    if (parsed.reason === 'decimal') return { intent: 'DONATION_AMOUNT', text: T(c, 'donate_decimal') };
+    if (parsed.reason === 'range') return { intent: 'DONATION_AMOUNT', text: T(c, 'donate_range', { max: MAX_DONATION.toLocaleString('en-IN') }) };
+    // No amount typed: offer the quick-amount list (customers can still type any amount).
+    await writeState(c.conversationId, { step: 'AWAIT_DONATION_AMOUNT', at: Date.now() });
+    return donationMenu(c);
+  }
+  return donationWithAmount(c, parsed.amount);
+}
+
+async function createDonationReply(c: Ctx, amount: number): Promise<BotReply> {
+  await writeState(c.conversationId, null);
   try {
-    const user = await db.user.findUnique({ where: { phone: ctx.phone } });
-    const result = await createDonationLink({ phone: ctx.phone, name: user?.name, email: user?.email, amount });
-    if (result.mock) {
-      return { intent: 'DONATION', text: `Donation ${result.reference} ka demo record bana hai, lekin MOCK_PROVIDERS enabled hai. Yeh real payment link nahi hai, payment na karein.` };
-    }
+    const user = await db.user.findUnique({ where: { phone: c.phone } });
+    const result = await createDonationLink({ phone: c.phone, name: user?.name, email: user?.email, amount, lang: c.lang });
+    if (result.mock) return { intent: 'DONATION', text: T(c, 'donate_mock', { ref: result.reference }) };
     return { intent: 'DONATION', text: result.message };
   } catch (e: any) {
     console.error('[BOT] Donation link creation failed:', e?.error?.description || e?.message || e);
-    return { intent: 'DONATION_ERROR', text: `Abhi payment link nahi ban saka, isliye koi payment na karein. Kripya thodi der baad dobara try karein. ${SUPPORT}` };
+    return { intent: 'DONATION_ERROR', text: T(c, 'link_error') };
   }
 }
 
 /* ------------------------------------------------------------------ payment status / receipts */
 
-async function handlePaymentQuery(ctx: Ctx, text: string, refs: { donRef: string | null; ordRef: string | null }): Promise<BotReply | null> {
+async function handlePaymentQuery(c: Ctx, text: string, refs: { donRef: string | null; ordRef: string | null }): Promise<BotReply | null> {
   const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
   let donation = null as Awaited<ReturnType<typeof db.donation.findFirst>>;
   let order = null as Awaited<ReturnType<typeof db.order.findFirst>>;
 
   if (refs.donRef) {
-    donation = await db.donation.findFirst({ where: { reference: refs.donRef, user: { phone: ctx.phone } } });
-    if (!donation) return { intent: 'DONATION_STATUS', text: `Is WhatsApp number se ${refs.donRef} reference ka donation record nahi mila. Reference dobara check karein ya ${SUPPORT}` };
+    donation = await db.donation.findFirst({ where: { reference: refs.donRef, user: { phone: c.phone } } });
+    if (!donation) return { intent: 'DONATION_STATUS', text: T(c, 'notfound_don', { ref: refs.donRef }) };
   } else if (refs.ordRef) {
-    order = await db.order.findFirst({ where: { orderNumber: refs.ordRef, user: { phone: ctx.phone } } });
-    if (!order) return { intent: 'ORDER_STATUS', text: `Is WhatsApp number se ${refs.ordRef} order nahi mila. Order number dobara check karein ya ${SUPPORT}` };
+    order = await db.order.findFirst({ where: { orderNumber: refs.ordRef, user: { phone: c.phone } } });
+    if (!order) return { intent: 'ORDER_STATUS', text: T(c, 'notfound_ord', { ref: refs.ordRef }) };
   } else {
     const [d, o] = await Promise.all([
-      db.donation.findFirst({ where: { user: { phone: ctx.phone }, createdAt: { gte: since }, paymentStatus: { not: 'FAILED' } }, orderBy: { createdAt: 'desc' } })
-        .then((x) => x ?? db.donation.findFirst({ where: { user: { phone: ctx.phone }, createdAt: { gte: since } }, orderBy: { createdAt: 'desc' } })),
-      db.order.findFirst({ where: { user: { phone: ctx.phone }, createdAt: { gte: since }, status: { not: 'CANCELLED' } }, orderBy: { createdAt: 'desc' } }),
+      db.donation.findFirst({ where: { user: { phone: c.phone }, createdAt: { gte: since }, paymentStatus: { not: 'FAILED' } }, orderBy: { createdAt: 'desc' } })
+        .then((x) => x ?? db.donation.findFirst({ where: { user: { phone: c.phone }, createdAt: { gte: since } }, orderBy: { createdAt: 'desc' } })),
+      db.order.findFirst({ where: { user: { phone: c.phone }, createdAt: { gte: since }, status: { not: 'CANCELLED' } }, orderBy: { createdAt: 'desc' } }),
     ]);
     const mentionsOrder = /order|product|saman|samaan|parcel|delivery|invoice|ऑर्डर/i.test(text);
     const mentionsDonation = hasDonationIntent(text);
@@ -198,254 +365,236 @@ async function handlePaymentQuery(ctx: Ctx, text: string, refs: { donRef: string
     if (!donation && !order) {
       // "done"/"ok" style one-liners with no records are ambiguous: let normal routing continue.
       if (!isReceiptRequest(text) && !hasTrackIntent(text) && !/payment|donation|paid/i.test(text)) return null;
-      return { intent: 'PAYMENT_NONE', text: `Mujhe is WhatsApp number se judi koi recent donation ya order entry nahi mili. Agar aapne donation ya order kiya hai to uska reference number (DON-... / ORD-...) bhejein. ${SUPPORT}` };
+      return { intent: 'PAYMENT_NONE', text: T(c, 'pay_none') };
     }
   }
 
-  if (donation) return donationStatusReply(donation.id, ctx.channel);
-  if (order) return orderStatusReply(order.id, /invoice|receipt|bill|रसीद/i.test(text), ctx.channel);
+  if (donation) return donationStatusReply(c, donation.id);
+  if (order) return orderStatusReply(c, order.id, /invoice|receipt|bill|रसीद|पावती|ਰਸੀਦ/i.test(text));
   return null;
 }
 
-async function donationStatusReply(donationId: string, channel: 'whatsapp' | 'web' = 'whatsapp'): Promise<BotReply> {
+async function donationStatusReply(c: Ctx, donationId: string): Promise<BotReply> {
+  const channel = c.channel ?? 'whatsapp';
   let rec;
   try { rec = await reconcileDonation(donationId); } catch (e: any) { console.error('[BOT] reconcileDonation failed:', e?.message || e); }
   const d = await db.donation.findUnique({ where: { id: donationId }, include: { user: true } });
-  if (!d) return { intent: 'DONATION_STATUS', text: 'Donation record nahi mila.' };
+  if (!d) return { intent: 'DONATION_STATUS', text: T(c, 'record_missing') };
+  const amount = d.amount.toLocaleString('en-IN');
 
   if (d.paymentStatus === 'PAID') {
-    const lead = rec?.justPaid
-      ? `Razorpay se aapka ₹${d.amount.toLocaleString('en-IN')} ka payment verify ho gaya hai. 🙏`
-      : `Aapka ₹${d.amount.toLocaleString('en-IN')} ka donation verified hai. 🙏`;
-    if (channel === 'web') {
-      return { intent: 'DONATION_RECEIPT', text: `${lead}\nReference: ${d.reference}\nDhanyavaad! Aapki PDF receipt yahan se download karein:\n${env.API_URL}/api/donations/${d.id}/receipt` };
-    }
+    const lead = T(c, rec?.justPaid ? 'don_lead_just' : 'don_lead', { amount });
+    const url = `${env.API_URL}/api/donations/${d.id}/receipt`;
+    if (channel === 'web') return { intent: 'DONATION_RECEIPT', text: T(c, 'don_paid_web', { lead, ref: d.reference, url }) };
     return {
       intent: 'DONATION_RECEIPT',
-      text: `${lead}\nReference: ${d.reference}\nDhanyavaad! PDF receipt bhej raha hoon.`,
+      text: T(c, 'don_paid_wa', { lead, ref: d.reference }),
       after: async () => {
         try { await sendReceiptPdf(d.id); }
         catch (e: any) {
           console.error('[BOT] Receipt PDF send failed:', e?.message || e);
-          await sendWhatsAppText(d.user.phone, `Receipt PDF bhejne mein dikkat aayi. Aap yahan se download kar sakte hain:\n${env.API_URL}/api/donations/${d.id}/receipt\n\n${SUPPORT}`);
+          await sendWhatsAppText(d.user.phone, T(c, 'receipt_pdf_fail', { url }));
         }
       },
     };
   }
 
-  const ref = `${d.reference} (₹${d.amount.toLocaleString('en-IN')})`;
-  if (!rec || rec.unverified) {
-    return { intent: 'DONATION_STATUS', text: `Donation ${ref} abhi hamare record mein ${d.paymentStatus} hai aur main Razorpay se is payment ko abhi verify nahi kar paaya. Kripya dobara payment na karein. 2-3 minute baad "receipt" likhein, ya ${SUPPORT}` };
-  }
-  if (rec.status === 'EXPIRED' || rec.status === 'CANCELLED') {
-    return { intent: 'DONATION_STATUS', text: `Donation ${ref} ka payment link ${rec.status === 'EXPIRED' ? 'expire' : 'cancel'} ho chuka hai aur koi payment receive nahi hua. Naya donation shuru karne ke liye "Donation 500" jaise amount ke saath likhein.` };
-  }
-  return { intent: 'DONATION_STATUS', text: `Razorpay par donation ${ref} ka payment abhi tak receive nahi hua hai. Agar aapne abhi payment kiya hai to 1-2 minute baad "receipt" likhein. Payment na hua ho to naya link ke liye "Donation 500" jaise amount ke saath likhein. Dobara payment tabhi karein jab pehla payment fail dikhe.` };
+  const ref = `${d.reference} (₹${amount})`;
+  if (!rec || rec.unverified) return { intent: 'DONATION_STATUS', text: T(c, 'don_unverified', { ref, status: d.paymentStatus }) };
+  if (rec.status === 'EXPIRED') return { intent: 'DONATION_STATUS', text: T(c, 'don_expired', { ref }) };
+  if (rec.status === 'CANCELLED') return { intent: 'DONATION_STATUS', text: T(c, 'don_cancelled', { ref }) };
+  return { intent: 'DONATION_STATUS', text: T(c, 'don_pending', { ref }) };
 }
 
-async function orderStatusReply(orderId: string, wantsInvoice: boolean, channel: 'whatsapp' | 'web' = 'whatsapp'): Promise<BotReply> {
+async function orderStatusReply(c: Ctx, orderId: string, wantsInvoice: boolean): Promise<BotReply> {
+  const channel = c.channel ?? 'whatsapp';
   let rec;
   try { rec = await reconcileOrder(orderId); } catch (e: any) { console.error('[BOT] reconcileOrder failed:', e?.message || e); }
   const o = await db.order.findUnique({ where: { id: orderId }, include: { user: true, items: { include: { product: true } } } });
-  if (!o) return { intent: 'ORDER_STATUS', text: 'Order record nahi mila.' };
+  if (!o) return { intent: 'ORDER_STATUS', text: T(c, 'record_missing') };
 
-  const items = o.items.map((i) => `${i.product.name} x ${i.quantity}`).join(', ');
-  const base = `Order ${o.orderNumber}\nItems: ${items}\nTotal: ${money(o.total)}`;
+  const base = T(c, 'ord_base', { number: o.orderNumber, items: o.items.map((i) => `${i.product.name} x ${i.quantity}`).join(', '), total: money(o.total) });
 
   if (o.paymentStatus !== 'PAID') {
-    if (!rec || rec.unverified) return { intent: 'ORDER_STATUS', text: `${base}\nPayment status: ${o.paymentStatus}\n\nMain Razorpay se is payment ko abhi verify nahi kar paaya. Dobara payment na karein; 2-3 minute baad order number bhejkar status poochein, ya ${SUPPORT}` };
-    if (rec.status === 'EXPIRED' || rec.status === 'CANCELLED') return { intent: 'ORDER_STATUS', text: `${base}\nIs order ka payment link ${rec.status === 'EXPIRED' ? 'expire' : 'cancel'} ho gaya hai. Naya order karne ke liye product ka naam bhejein.` };
-    return { intent: 'ORDER_STATUS', text: `${base}\nPayment: abhi receive nahi hua (Razorpay par pending). Payment complete karne ke baad order confirm hoga.` };
+    if (!rec || rec.unverified) return { intent: 'ORDER_STATUS', text: T(c, 'ord_unverified', { base, status: o.paymentStatus }) };
+    if (rec.status === 'EXPIRED') return { intent: 'ORDER_STATUS', text: T(c, 'ord_expired', { base }) };
+    if (rec.status === 'CANCELLED') return { intent: 'ORDER_STATUS', text: T(c, 'ord_cancelled', { base }) };
+    return { intent: 'ORDER_STATUS', text: T(c, 'ord_pending', { base }) };
   }
 
-  const lines = [base, `Payment: verified ✅`, `Status: ${ORDER_STATUS_TEXT[o.status] || o.status}`];
-  if (o.courier) lines.push(`Courier: ${o.courier}`);
-  if (o.awb) lines.push(`AWB: ${o.awb}`);
-  if (o.trackingUrl) lines.push(`Tracking: ${o.trackingUrl}`);
-  if (!o.awb && ['CONFIRMED', 'PROCESSING'].includes(o.status)) lines.push('Dispatch hone par tracking details yahin share ki jayengi.');
-  if (rec?.justPaid) lines.push('\nAapka payment abhi verify hua hai; confirmation aur invoice bheji ja rahi hai.');
-  if (channel === 'web' && wantsInvoice) lines.push(`Invoice: ${env.API_URL}/api/orders/${o.id}/invoice`);
+  const statusKey = `os_${o.status}` as MessageKey;
+  const lines = [base, T(c, 'ord_verified'), T(c, 'ord_status', { status: statusKey in M ? t(c.lang, statusKey) : o.status })];
+  if (o.courier) lines.push(T(c, 'ord_courier', { x: o.courier }));
+  if (o.awb) lines.push(T(c, 'ord_awb', { x: o.awb }));
+  if (o.trackingUrl) lines.push(T(c, 'ord_tracking', { x: o.trackingUrl }));
+  if (!o.awb && ['CONFIRMED', 'PROCESSING'].includes(o.status)) lines.push(T(c, 'ord_dispatch_note'));
+  if (rec?.justPaid) lines.push(`\n${T(c, 'ord_just_paid')}`);
+  if (channel === 'web' && wantsInvoice) lines.push(T(c, 'ord_invoice_web', { url: `${env.API_URL}/api/orders/${o.id}/invoice` }));
   return {
     intent: 'ORDER_STATUS',
     text: lines.join('\n'),
-    after: channel !== 'web' && wantsInvoice && !rec?.justPaid ? async () => { await sendOrderInvoice(o.id).catch(async (e) => { console.error('[BOT] Invoice send failed:', e?.message || e); await sendWhatsAppText(o.user.phone, `Invoice bhejne mein dikkat aayi. ${SUPPORT}`); }); } : undefined,
+    after: channel !== 'web' && wantsInvoice && !rec?.justPaid ? async () => { await sendOrderInvoice(o.id).catch(async (e) => { console.error('[BOT] Invoice send failed:', e?.message || e); await sendWhatsAppText(o.user.phone, T(c, 'invoice_fail')); }); } : undefined,
   };
 }
 
 /* ------------------------------------------------------------------ shop (stateless entry) */
 
-async function handleShop(ctx: Ctx, text: string): Promise<BotReply | null> {
+async function handleShop(c: Ctx, text: string): Promise<BotReply | null> {
   const products = await loadProducts();
   const { wanted, negated, spans } = findProducts(text, products);
 
-  if (wanted.length > 1) {
-    return { intent: 'SHOP', text: `Aapne ek se zyada products likhe hain (${wanted.map((p) => p.name).join(', ')}). Ek baar mein ek product order hota hai. Pehle kaunsa order karna hai?` };
-  }
+  if (wanted.length > 1) return { intent: 'SHOP', text: T(c, 'shop_multi', { names: wanted.map((p) => p.name).join(', ') }) };
   if (wanted.length === 1) {
     const p = wanted[0];
     if (hasPhotoIntent(text) && !hasBuyIntent(text)) {
       const image = productImage(p);
-      return {
-        intent: 'SHOP', image,
-        text: image
-          ? `${p.name} — ${money(p.price)}${stockNote(p)}.${p.stock > 0 ? ` Order karne ke liye "${p.name} kharidna hai" likhein.` : ''}`
-          : `${p.name} ki photo abhi available nahi hai. Price: ${money(p.price)}${stockNote(p)}.${p.stock > 0 ? ` Order karne ke liye "${p.name} kharidna hai" likhein.` : ''}`,
-      };
+      const hint = p.stock > 0 ? ` ${T(c, 'order_hint', { name: p.name })}` : '';
+      return { intent: 'SHOP', image, text: image ? `${stockHint(c, p)}${hint}` : `${T(c, 'photo_none', { name: p.name })} ${stockHint(c, p)}${hint}` };
     }
-    if (hasBuyIntent(text)) return startCheckout(ctx, p, parseQuantity(text, spans.get(p.id)));
-    if (hasPriceIntent(text)) {
-      return { intent: 'SHOP', image: productImage(p), text: `${p.name} — ${money(p.price)}${stockNote(p)}.${p.stock > 0 ? ` Order karne ke liye "${p.name} kharidna hai" likhein.` : ''}` };
-    }
+    if (hasBuyIntent(text)) return startCheckout(c, p, parseQuantity(text, spans.get(p.id)));
+    if (hasPriceIntent(text)) return { intent: 'SHOP', image: productImage(p), text: `${stockHint(c, p)}${p.stock > 0 ? ` ${T(c, 'order_hint', { name: p.name })}` : ''}` };
     // Just the product name on its own means "I want this".
-    if (normalizeBare(text) === normalizeBare(p.name)) return startCheckout(ctx, p, 1);
+    if (normalizeBare(text) === normalizeBare(p.name)) return startCheckout(c, p, 1);
     return null;
   }
   if (negated.length && hasBuyIntent(text)) {
-    await writeState(ctx.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now() });
-    return { intent: 'SHOP', text: productList(products) };
+    await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now() });
+    return productMenu(c, products);
   }
-  if (hasCatalogIntent(text) || (hasBuyIntent(text) && /order|kharid|khareed|buy|purchase|चाहिए|खरीद|ऑर्डर|product|saman/i.test(text) && !hasDonationIntent(text))) {
-    await writeState(ctx.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now() });
-    return { intent: 'SHOP', text: productList(products) };
+  if (hasCatalogIntent(text) || (hasBuyIntent(text) && /order|kharid|khareed|buy|purchase|चाहिए|खरीद|ऑर्डर|खरेदी|ਖਰੀਦ|ਆਰਡਰ|product|saman/i.test(text) && !hasDonationIntent(text))) {
+    await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now() });
+    return productMenu(c, products);
   }
   return null;
 }
 
-const normalizeBare = (s: string) => s.toLowerCase().replace(/[^a-z0-9\u0900-\u097f]+/g, '');
+const normalizeBare = (s: string) => s.toLowerCase().replace(/[^a-z0-9\u0900-\u097f\u0a00-\u0a7f]+/g, '');
 
-async function startCheckout(ctx: Ctx, p: ProductRow, quantity: number, keep?: { address: string; pin: string }): Promise<BotReply> {
-  if (p.stock < 1) {
-    return { intent: 'SHOP', text: `${p.name} abhi out of stock hai. Koi doosra product choose karein ya "products" likhein.` };
-  }
-  if (quantity > p.stock) {
-    return { intent: 'SHOP', text: `${p.name} ki itni quantity abhi available nahi hai. Kripya kam quantity bhejein, jaise "1 ${p.name}".` };
-  }
-  const user = await db.user.findUnique({ where: { phone: ctx.phone } });
+async function startCheckout(c: Ctx, p: ProductRow, quantity: number, keep?: { address: string; pin: string }): Promise<BotReply> {
+  if (p.stock < 1) return { intent: 'SHOP', text: T(c, 'out_of_stock', { name: p.name }) };
+  if (quantity > p.stock) return { intent: 'SHOP', text: T(c, 'qty_too_many', { name: p.name }) };
+  const user = await db.user.findUnique({ where: { phone: c.phone } });
   if (!user?.name) {
-    await writeState(ctx.conversationId, { step: 'AWAIT_NAME', at: Date.now(), productId: p.id, quantity, ...(keep || {}) });
-    return { intent: 'SHOP', image: productImage(p), text: `Aapne ${p.name} x ${quantity} choose kiya hai (${money(p.price)} each). Delivery ke liye apna poora naam bhejein.` };
+    await writeState(c.conversationId, { step: 'AWAIT_NAME', at: Date.now(), productId: p.id, quantity, ...(keep || {}) });
+    return { intent: 'SHOP', image: productImage(p), text: T(c, 'ask_name_product', { name: p.name, qty: quantity, price: money(p.price) }) };
   }
-  if (keep) return confirmationReply(ctx, p, quantity, user.name, keep.address, keep.pin);
-  await writeState(ctx.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: p.id, quantity });
+  if (keep) return confirmationReply(c, p, quantity, user.name, keep.address, keep.pin);
+  await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: p.id, quantity });
   const subtotal = p.price * quantity;
   const fee = shippingFor(subtotal);
-  return { intent: 'SHOP', image: productImage(p), text: `${p.name} x ${quantity} — ${money(subtotal)}.\nDelivery ke liye apna poora address, area/city, state aur 6-digit PIN code ek message mein bhejein.\nDelivery charge: ${fee === 0 ? 'free' : money(fee)}.` };
+  return { intent: 'SHOP', image: productImage(p), text: T(c, 'ask_address', { name: p.name, qty: quantity, subtotal: money(subtotal), fee: fee === 0 ? T(c, 'fee_free') : money(fee) }) };
 }
 
-async function confirmationReply(ctx: Ctx, p: ProductRow, quantity: number, name: string, address: string, pin: string): Promise<BotReply> {
-  await writeState(ctx.conversationId, { step: 'AWAIT_CONFIRM', at: Date.now(), productId: p.id, quantity, address, pin });
+async function confirmationReply(c: Ctx, p: ProductRow, quantity: number, name: string, address: string, pin: string): Promise<BotReply> {
+  await writeState(c.conversationId, { step: 'AWAIT_CONFIRM', at: Date.now(), productId: p.id, quantity, address, pin });
   const subtotal = p.price * quantity;
   const fee = shippingFor(subtotal);
-  return {
-    intent: 'SHOP_CONFIRM',
-    text: `Kripya apna order check karein:\n\nProduct: ${p.name} x ${quantity}\nProduct price: ${money(subtotal)}\nDelivery: ${money(fee)}\nTotal: ${money(subtotal + fee)}\n\nNaam: ${name}\nAddress: ${address}\n\nSab sahi hai to "haan" likhein. Address badalna ho to naya address bhejein. Cancel ke liye "cancel".`,
-  };
+  const body = T(c, 'confirm_summary', { product: p.name, qty: quantity, price: money(subtotal), fee: money(fee), total: money(subtotal + fee), name, address });
+  return { ...buttons('SHOP_CONFIRM', body, [
+    { id: 'cfm:yes', title: T(c, 'b_confirm') }, { id: 'cfm:addr', title: T(c, 'b_address') }, { id: 'cfm:no', title: T(c, 'b_cancel') },
+  ]) };
 }
 
 /* ------------------------------------------------------------------ state machine */
 
-async function handleState(ctx: Ctx, text: string, state: State): Promise<BotReply | null> {
+async function handleState(c: Ctx, text: string, state: State): Promise<BotReply | null> {
   const products = state.step.startsWith('AWAIT_DONATION') ? [] : await loadProducts();
   const stateProduct = 'productId' in state ? products.find((p) => p.id === state.productId) : undefined;
 
   switch (state.step) {
     case 'AWAIT_DONATION_AMOUNT': {
       const parsed = parseAmount(text, { allowBare: true });
-      if (parsed.amount != null) {
-        const user = await db.user.findUnique({ where: { phone: ctx.phone } });
-        if (!user?.name) {
-          await writeState(ctx.conversationId, { step: 'AWAIT_DONATION_NAME', at: Date.now(), amount: parsed.amount });
-          return { intent: 'DONATION_NAME', text: `₹${parsed.amount.toLocaleString('en-IN')} donation ke liye dhanyavaad! Receipt par naam likhne ke liye apna poora naam bhejein.` };
-        }
-        return createDonationReply(ctx, parsed.amount);
-      }
-      if (parsed.reason === 'decimal' || parsed.reason === 'range') return handleDonationStart(ctx, text, true);
+      if (parsed.amount != null) return donationWithAmount(c, parsed.amount);
+      if (parsed.reason === 'decimal' || parsed.reason === 'range') return handleDonationStart(c, text, true);
       // A product message while waiting for an amount: leave donation mode.
-      if (findProducts(text, await loadProducts()).wanted.length || hasBuyIntent(text) || hasCatalogIntent(text)) { await writeState(ctx.conversationId, null); return null; }
-      return { intent: 'DONATION_AMOUNT', text: 'Kripya donation amount number mein bhejein, jaise ₹500. Cancel karne ke liye "cancel" likhein.' };
+      if (findProducts(text, await loadProducts()).wanted.length || hasBuyIntent(text) || hasCatalogIntent(text)) { await writeState(c.conversationId, null); return null; }
+      return { intent: 'DONATION_AMOUNT', text: T(c, 'donate_amount_retry') };
     }
 
     case 'AWAIT_DONATION_NAME': {
       const name = validateName(text);
-      if (!name.ok) return { intent: 'DONATION_NAME', text: 'Kripya receipt ke liye apna poora naam bhejein (sirf naam, number ke bina). Cancel ke liye "cancel".' };
-      await db.user.update({ where: { phone: ctx.phone }, data: { name: name.name } });
-      return createDonationReply(ctx, state.amount);
+      if (!name.ok) return { intent: 'DONATION_NAME', text: T(c, 'donate_name_retry') };
+      await db.user.update({ where: { phone: c.phone }, data: { name: name.name } });
+      return createDonationReply(c, state.amount);
     }
 
     case 'AWAIT_PRODUCT': {
       const { wanted, spans } = findProducts(text, products);
-      if (wanted.length > 1) return { intent: 'SHOP', text: `Aapne ek se zyada products likhe hain (${wanted.map((p) => p.name).join(', ')}). Kripya ek product ka naam bhejein.` };
-      if (wanted.length === 1) return startCheckout(ctx, wanted[0], parseQuantity(text, spans.get(wanted[0].id)));
-      if (hasDonationIntent(text)) { await writeState(ctx.conversationId, null); return null; }
-      return { intent: 'SHOP', text: `Mujhe is naam ka koi product nahi mila.\n\n${productList(products)}` };
+      if (wanted.length > 1) return { intent: 'SHOP', text: T(c, 'shop_multi', { names: wanted.map((p) => p.name).join(', ') }) };
+      if (wanted.length === 1) return startCheckout(c, wanted[0], parseQuantity(text, spans.get(wanted[0].id)));
+      if (hasDonationIntent(text)) { await writeState(c.conversationId, null); return null; }
+      const menu = productMenu(c, products);
+      return { ...menu, text: `${T(c, 'product_not_found')}\n\n${menu.text}`, interactive: menu.interactive && menu.interactive.kind === 'list' ? { ...menu.interactive, body: `${T(c, 'product_not_found')}\n\n${menu.interactive.body}` } : menu.interactive };
     }
 
     case 'AWAIT_NAME':
     case 'AWAIT_ADDRESS':
     case 'AWAIT_CONFIRM': {
       if (!stateProduct || stateProduct.stock < 1) {
-        await writeState(ctx.conversationId, null);
-        return { intent: 'SHOP', text: `${stateProduct?.name || 'Yeh product'} ab available nahi hai.\n\n${productList(products)}` };
+        await writeState(c.conversationId, null);
+        const menu = productMenu(c, products);
+        const gone = T(c, 'product_gone', { name: stateProduct?.name || '' }).trim();
+        return { ...menu, text: `${gone}\n\n${menu.text}`, interactive: menu.interactive && menu.interactive.kind === 'list' ? { ...menu.interactive, body: `${gone}\n\n${menu.interactive.body}` } : menu.interactive };
       }
       const { wanted, spans } = findProducts(text, products);
       const pin = extractPin(text);
 
-      // Customer changes their mind about the product mid-checkout ("Nariyal order karna h").
-      if (wanted.length > 1) return { intent: 'SHOP', text: `Aapne ek se zyada products likhe hain (${wanted.map((p) => p.name).join(', ')}). Ek baar mein ek product order hota hai. Kaunsa chahiye?` };
+      // Customer changes their mind about the product mid-checkout ("order Nariyal").
+      if (wanted.length > 1) return { intent: 'SHOP', text: T(c, 'shop_multi', { names: wanted.map((p) => p.name).join(', ') }) };
       if (wanted.length === 1 && (wanted[0].id !== state.productId || !pin)) {
         const keep = state.step === 'AWAIT_CONFIRM' ? { address: state.address, pin: state.pin } : state.step === 'AWAIT_NAME' && state.address ? { address: state.address, pin: state.pin! } : undefined;
-        return startCheckout(ctx, wanted[0], parseQuantity(text, spans.get(wanted[0].id)), keep);
+        return startCheckout(c, wanted[0], parseQuantity(text, spans.get(wanted[0].id)), keep);
       }
 
       if (state.step === 'AWAIT_NAME') {
         const name = validateName(text);
-        if (!name.ok) return { intent: 'SHOP', text: 'Delivery ke liye apna poora naam bhejein (sirf naam, number ke bina). Sirf "haan" likhne se naam save nahi hota.' };
-        await db.user.update({ where: { phone: ctx.phone }, data: { name: name.name } });
-        if (state.address && state.pin) return confirmationReply(ctx, stateProduct, state.quantity, name.name, state.address, state.pin);
-        await writeState(ctx.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: state.productId, quantity: state.quantity });
-        return { intent: 'SHOP', text: 'Dhanyavaad. Ab poora delivery address, area/city, state aur 6-digit PIN code ek message mein bhejein.' };
+        if (!name.ok) return { intent: 'SHOP', text: T(c, 'name_retry') };
+        await db.user.update({ where: { phone: c.phone }, data: { name: name.name } });
+        if (state.address && state.pin) return confirmationReply(c, stateProduct, state.quantity, name.name, state.address, state.pin);
+        await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: state.productId, quantity: state.quantity });
+        return { intent: 'SHOP', text: T(c, 'name_then_address') };
       }
 
       const qty = parseExplicitQuantity(text);
       if (qty != null) {
-        if (qty > stateProduct.stock) return { intent: 'SHOP', text: `${stateProduct.name} ki itni quantity abhi available nahi hai. Kripya kam quantity bhejein.` };
+        if (qty > stateProduct.stock) return { intent: 'SHOP', text: T(c, 'qty_too_many', { name: stateProduct.name }) };
         if (state.step === 'AWAIT_CONFIRM') {
-          const u = await db.user.findUnique({ where: { phone: ctx.phone } });
-          return confirmationReply(ctx, stateProduct, qty, u?.name || 'Customer', state.address, state.pin);
+          const u = await db.user.findUnique({ where: { phone: c.phone } });
+          return confirmationReply(c, stateProduct, qty, u?.name || T(c, 'customer_default'), state.address, state.pin);
         }
-        await writeState(ctx.conversationId, { ...state, quantity: qty, at: Date.now() });
-        return { intent: 'SHOP', text: `Quantity ${qty} set kar di. Ab poora delivery address aur 6-digit PIN code bhejein.` };
+        await writeState(c.conversationId, { ...state, quantity: qty, at: Date.now() });
+        return { intent: 'SHOP', text: T(c, 'qty_set', { qty }) };
       }
 
-      if (state.step === 'AWAIT_CONFIRM' && isYes(text)) return placeOrder(ctx, state, stateProduct);
-      if (state.step === 'AWAIT_CONFIRM' && /address|pata|badal|change/i.test(text) && !pin) {
-        await writeState(ctx.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: state.productId, quantity: state.quantity });
-        return { intent: 'SHOP', text: 'Theek hai. Naya poora delivery address aur 6-digit PIN code ek message mein bhejein.' };
+      if (state.step === 'AWAIT_CONFIRM' && isYes(text)) return placeOrder(c, state, stateProduct);
+      if (state.step === 'AWAIT_CONFIRM' && /address|pata|badal|change|पता|पत्ता|ਪਤਾ|बदल|ਬਦਲ/i.test(text) && !pin) {
+        await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: state.productId, quantity: state.quantity });
+        return { intent: 'SHOP', text: T(c, 'new_address') };
       }
 
       const check = validateAddress(text);
       if (!check.ok) {
-        if (state.step === 'AWAIT_CONFIRM') return { intent: 'SHOP', text: 'Order confirm karne ke liye "haan" likhein, address badalne ke liye naya poora address bhejein, ya "cancel" likhein.' };
-        return { intent: 'SHOP', text: check.reason };
+        if (state.step === 'AWAIT_CONFIRM') return { intent: 'SHOP', text: T(c, 'confirm_hint') };
+        return { intent: 'SHOP', text: T(c, check.reason) };
       }
-      const u = await db.user.findUnique({ where: { phone: ctx.phone } });
+      const u = await db.user.findUnique({ where: { phone: c.phone } });
       if (!u?.name) {
-        await writeState(ctx.conversationId, { step: 'AWAIT_NAME', at: Date.now(), productId: state.productId, quantity: state.quantity, address: check.address, pin: check.pin });
-        return { intent: 'SHOP', text: 'Address mil gaya. Ab delivery ke liye apna poora naam bhejein.' };
+        await writeState(c.conversationId, { step: 'AWAIT_NAME', at: Date.now(), productId: state.productId, quantity: state.quantity, address: check.address, pin: check.pin });
+        return { intent: 'SHOP', text: T(c, 'address_then_name') };
       }
-      return confirmationReply(ctx, stateProduct, state.quantity, u.name, check.address, check.pin);
+      return confirmationReply(c, stateProduct, state.quantity, u.name, check.address, check.pin);
     }
   }
 }
 
-async function placeOrder(ctx: Ctx, state: Extract<State, { step: 'AWAIT_CONFIRM' }>, p: ProductRow): Promise<BotReply> {
+async function placeOrder(c: Ctx, state: Extract<State, { step: 'AWAIT_CONFIRM' }>, p: ProductRow): Promise<BotReply> {
   const fresh = await db.product.findUnique({ where: { id: p.id } });
   if (!fresh || !isSellable(fresh) || fresh.stock < state.quantity) {
-    await writeState(ctx.conversationId, null);
-    return { intent: 'SHOP', text: `${p.name} ab ${state.quantity} quantity mein available nahi hai. "products" likhkar current list dekhein.` };
+    await writeState(c.conversationId, null);
+    return { intent: 'SHOP', text: T(c, 'place_unavailable', { name: p.name, qty: state.quantity }) };
   }
-  const user = await db.user.findUnique({ where: { phone: ctx.phone } });
-  if (!user) return { intent: 'SHOP', text: `Aapka profile nahi mila. Kripya dobara shuru karein. ${SUPPORT}` };
+  const user = await db.user.findUnique({ where: { phone: c.phone } });
+  if (!user) return { intent: 'SHOP', text: T(c, 'profile_missing') };
 
   const subtotal = fresh.price * state.quantity;
   const shippingFee = shippingFor(subtotal);
@@ -462,23 +611,21 @@ async function placeOrder(ctx: Ctx, state: Extract<State, { step: 'AWAIT_CONFIRM
   await db.user.update({ where: { id: user.id }, data: { address: { full: state.address, pin: state.pin } } }).catch(() => undefined);
 
   try {
-    const link: any = await createOrderPaymentLink({ amount: total, orderNumber, name: user.name, email: user.email, phone: ctx.phone });
+    const link: any = await createOrderPaymentLink({ amount: total, orderNumber, name: user.name, email: user.email, phone: c.phone });
     const url = String(link?.short_url || '');
     if (!link?.id || !url) throw new Error('Payment provider did not return a payment URL');
     await db.order.update({ where: { id: order.id }, data: { razorpayOrderId: String(link.id) } });
-    await writeState(ctx.conversationId, null);
-    if (String(link.id).startsWith('mock_')) {
-      return { intent: 'SHOP_ORDER', text: `Order ${orderNumber} ka demo record bana hai, lekin MOCK_PROVIDERS enabled hai. Yeh real payment link nahi hai, payment na karein.` };
-    }
+    await writeState(c.conversationId, null);
+    if (String(link.id).startsWith('mock_')) return { intent: 'SHOP_ORDER', text: T(c, 'order_mock', { number: orderNumber }) };
     return {
       intent: 'SHOP_ORDER',
-      text: `Aapka order create ho gaya hai.\nOrder: ${orderNumber}\nProduct: ${fresh.name} x ${state.quantity}\nProduct price: ${money(subtotal)}\nDelivery: ${money(shippingFee)}\nTotal: ${money(total)}\n\nPayment link: ${url}\n\nPayment verify hone ke baad hi order confirm maana jayega, aur confirmation isi WhatsApp par aa jayegi. Payment ke baad status ke liye order number bhejein.`,
+      text: T(c, 'order_created', { number: orderNumber, product: fresh.name, qty: state.quantity, price: money(subtotal), fee: money(shippingFee), total: money(total), url }),
     };
   } catch (e: any) {
     console.error('[BOT] Order payment link failed:', e?.error?.description || e?.message || e);
     await db.order.update({ where: { id: order.id }, data: { status: 'CANCELLED', paymentStatus: 'FAILED' } }).catch(() => undefined);
-    // Keep the confirm step so the customer can simply say "haan" again.
-    await writeState(ctx.conversationId, { ...state, at: Date.now() });
-    return { intent: 'SHOP_ERROR', text: `Abhi payment link nahi ban saka, isliye koi payment na karein. Kuch der baad "haan" likhkar dobara try karein. ${SUPPORT}` };
+    // Keep the confirm step so the customer can simply tap Confirm again.
+    await writeState(c.conversationId, { ...state, at: Date.now() });
+    return { intent: 'SHOP_ERROR', text: T(c, 'order_link_error') };
   }
 }

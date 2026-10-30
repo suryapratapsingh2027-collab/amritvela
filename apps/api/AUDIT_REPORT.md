@@ -87,3 +87,22 @@ Not verified: live Cloudinary upload and in-browser canvas cropping (no browser/
 - `required_error` is not a valid option in zod 4 (a monorepo can hoist zod 4 even though this app declares ^3). The code no longer uses version-specific options; verified with zod 3.25 and 4.6 (83 end-to-end checks each).
 - `@types/express`, `@types/cors`, `@types/jsonwebtoken`, `@types/pdfkit`, `typescript`, `prisma` moved to `dependencies` so a production-style install (`NODE_ENV=production`, Render) can still run `npm run build`.
 - Run `npm install` at the monorepo root. Do not run `npm i @prisma/client@latest` (it can jump major versions).
+
+---
+# Round 4 (2026-10-29): WhatsApp language picker + tap menus
+
+**Flow (WhatsApp and website chat):** `Hello` → welcome + **language list** (English, हिन्दी, Hinglish, ਪੰਜਾਬੀ, मराठी) → customer taps one → saved on the customer (`User.language`) → **main menu list** in that language → every later message, button, payment confirmation, receipt, shipping notice and Trust answer uses that language.
+
+Main menu rows: About the Trust · Donate · Contact us · (Follow us, only if links are configured) · Our Products · Order/Payment status · Donation receipt · Talk to our team · Change language.
+- *About the Trust* opens a second list (About & mission, Kirtan & Langar, Dharamshala, Medical camps, Achievements, Future plans); each topic is a pre-written text in all 5 languages followed by [Donate] [More topics] [Main menu] buttons.
+- *Donate* shows quick amounts (₹101, 501, 1100, 2100, 5100, Other amount). *Our Products* is a tap-list of in-stock products with prices; tapping one starts checkout with its photo.
+- Order summary has **[Confirm] [Change address] [Cancel]** buttons. Typing still works everywhere ("haan", "हो", "ਹਾਂ", "Donation 500", "Nariyal order"…).
+- If Meta ever rejects an interactive message, the same options are sent as numbered plain text automatically.
+- Website widget: starts with the same welcome/language picker; options appear as tappable chips.
+
+What is not possible: the tick-box look in the mock-up screenshot. WhatsApp's real equivalents are *list messages* and *reply buttons* (used here).
+
+Implementation: `src/i18n/` (139 messages × 5 languages, validated by `test/i18n.test.ts` for missing languages, placeholder mismatches and WhatsApp length limits), `integrations/whatsapp.ts` (interactive senders with limit sanitising), `services/whatsapp-bot.ts` (menus, tap routing). New migration `20261029100000_user_language`. New optional env: `TRUST_YOUTUBE_URL`, `TRUST_FACEBOOK_URL`, `TRUST_INSTAGRAM_URL`, `TRUST_WHATSAPP_COMMUNITY_URL`.
+
+**Please have a native speaker review the Punjabi and Marathi (and Hindi) wording** in `src/i18n/messages.ts` / `messages-shop.ts` before launch; changing a sentence is a one-line edit. Free-text Trust questions are answered by Gemini in the chosen language when configured; without Gemini the translated topic text is used.
+Verified: 105 end-to-end checks (incl. Punjabi/Hindi/Marathi journeys, taps, stale buttons, fallback), 67 unit tests, 15 UI tests, both production builds, zod 3 and 4. Not verified live: Meta's acceptance of the interactive payloads (built from the official Cloud API format) — test once with a real number.

@@ -11,6 +11,7 @@ import {
 import { makeInvoice } from './receipt';
 import { addressText, extractPin, guessStateCity, indianMobile, lookupPin, splitName } from './shipping-address';
 import { env } from '../config';
+import { normalizeLang, t } from '../i18n';
 
 /**
  * Marks an order paid exactly once, no matter how many times it is called
@@ -59,7 +60,7 @@ export async function markOrderPaid(orderId: string, paymentId: string) {
 
   await sendWhatsAppText(
     order.user.phone,
-    `Dhanyavaad! Aapka payment verify ho gaya hai.\nOrder ${order.orderNumber} confirm hai (Total ₹${order.total.toLocaleString('en-IN')}). Dispatch hone par tracking details isi WhatsApp par share ki jayengi.`,
+    t(normalizeLang(order.user.language), 'order_paid', { number: order.orderNumber, total: order.total.toLocaleString('en-IN') }),
   ).catch((e) => console.error('[ORDER PAID] WhatsApp confirmation failed:', e?.message || e));
 
   await sendOrderInvoice(order.id).catch((e) => console.error('[ORDER PAID] Invoice delivery failed:', e?.message || e));
@@ -77,7 +78,7 @@ export async function sendOrderInvoice(orderId: string) {
     paymentId: o.razorpayPaymentId, paidAt: o.paidAt, address: addr,
   });
   try {
-    await sendWhatsAppPdf(o.user.phone, pdf, `${o.orderNumber}.pdf`, `Invoice ${o.orderNumber}`);
+    await sendWhatsAppPdf(o.user.phone, pdf, `${o.orderNumber}.pdf`, t(normalizeLang(o.user.language), 'invoice_caption', { number: o.orderNumber }));
   } catch {
     await sendWhatsAppDocument(o.user.phone, `${env.API_URL}/api/orders/${o.id}/invoice`, `${o.orderNumber}.pdf`);
   }
@@ -162,7 +163,7 @@ export async function shipOrder(orderId: string) {
 
   await sendWhatsAppText(
     order.user.phone,
-    `Aapka order ${order.orderNumber} ship ho gaya hai.${courier ? `\nCourier: ${courier}` : ''}\nAWB: ${awb}\nTracking: https://shiprocket.co/tracking/${awb}`,
+    t(normalizeLang(order.user.language), 'ship_notice', { number: order.orderNumber, courier: courier ? `Courier: ${courier}\n` : '', awb, url: `https://shiprocket.co/tracking/${awb}` }),
   ).catch((e) => console.error('[SHIP] WhatsApp notice failed:', e?.message || e));
 
   return updated;

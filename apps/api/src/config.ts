@@ -24,6 +24,12 @@ const schema = z
     // true = on every boot, reset the ADMIN_EMAIL account's password to ADMIN_PASSWORD (emergency recovery). Default: only create the first admin.
     ADMIN_RESET_ON_BOOT: z.enum(['true', 'false']).default('false'),
 
+    // Optional public links shown in the WhatsApp menu ("Follow us"). Rows/links are simply omitted when unset.
+    TRUST_YOUTUBE_URL: z.string().url().optional().or(z.literal('').transform(() => undefined)),
+    TRUST_FACEBOOK_URL: z.string().url().optional().or(z.literal('').transform(() => undefined)),
+    TRUST_INSTAGRAM_URL: z.string().url().optional().or(z.literal('').transform(() => undefined)),
+    TRUST_WHATSAPP_COMMUNITY_URL: z.string().url().optional().or(z.literal('').transform(() => undefined)),
+
     // Outgoing email (password reset). If unset, reset links are printed in the server log instead.
     SMTP_HOST: z.string().optional(),
     SMTP_PORT: z.coerce.number().int().default(465),
