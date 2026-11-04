@@ -6,38 +6,43 @@
  * invent prices, stock, payment states or confirmations. Only free-form Trust questions fall through to the
  * AI (see routes/webhooks.ts), and that path is grounded + guarded in services/ai.ts.
  *
- * Multi-step flows (checkout, donation) keep their state in Conversation.state (JSON) instead of guessing it
+ * Multi-step flows (cart, checkout, donation) keep their state in Conversation.state (JSON) instead of guessing it
  * from the text of earlier messages, which is what caused wrong-product orders before.
  */
 import { Prisma } from '@prisma/client';
 import { db } from '../db';
 import { env } from '../config';
-import { sendWhatsAppText, toWhatsAppImageUrl, type InteractiveSpec } from '../integrations/whatsapp';
+import { sendWhatsAppPdf, sendWhatsAppText, toWhatsAppImageUrl, type InteractiveSpec } from '../integrations/whatsapp';
 import { createOrderPaymentLink } from '../integrations/razorpay';
 import { createDonationLink } from './donation-payment-link';
 import { reconcileDonation, reconcileOrder, sendReceiptPdf } from './payments';
 import { sendOrderInvoice } from './fulfillment';
+import { getSocialLinks } from './settings';
 import { isSellable, money, shippingFor } from './pricing';
 import { M } from '../i18n/messages';
 import { DEFAULT_LANG, LANGS, LANG_TITLES, isLang, normalizeLang, t, type Lang, type MessageKey } from '../i18n';
 import {
-  MAX_DONATION, extractDonationRef, extractOrderRef, extractPin, findProducts, hasBuyIntent, hasCatalogIntent,
-  hasDonationIntent, hasHumanIntent, hasPhotoIntent, hasPriceIntent, hasTrackIntent, isCancelOrMenu, isGreeting, isLanguageRequest, isMenuWord, isNo,
-  isPaymentClaim, isReceiptRequest, isYes, parseAmount, parseExplicitQuantity, parseQuantity, validateAddress, validateName,
+  MAX_DONATION, extractDonationRef, extractOrderRef, extractPin, findProducts, hasBuyIntent, hasCatalogIntent, hasDocsIntent,
+  hasDonationIntent, hasHumanIntent, hasPhotoIntent, hasPriceIntent, hasSocialIntent, hasTrackIntent, isCancelOrMenu, isGreeting, isLanguageRequest, isMenuWord, isNo,
+  isPaymentClaim, isReceiptRequest, isYes, normalize, parseAmount, parseCartItems, parseExplicitQuantity, validateAddress, validateName,
+  type CartMention,
 } from './bot-nlp';
 
 const STATE_TTL_MS = 30 * 60 * 1000;
+const MAX_CART_LINES = 10;
 
 export type BotReply = { text: string; intent: string; image?: { url: string; caption: string }; interactive?: InteractiveSpec; after?: () => Promise<void> };
 /** `replyId` is set when the customer tapped a list row / button (e.g. "menu:donate", "lang:pa", "prod:<id>", "cfm:yes"). */
 export type RouteInput = { phone: string; text: string; conversationId: string; channel?: 'whatsapp' | 'web'; replyId?: string };
 type Ctx = RouteInput & { lang: Lang; langChosen: boolean };
 
+type CartItem = { productId: string; qty: number };
 type State =
-  | { step: 'AWAIT_PRODUCT'; at: number }
-  | { step: 'AWAIT_NAME'; at: number; productId: string; quantity: number; address?: string; pin?: string }
-  | { step: 'AWAIT_ADDRESS'; at: number; productId: string; quantity: number }
-  | { step: 'AWAIT_CONFIRM'; at: number; productId: string; quantity: number; address: string; pin: string }
+  | { step: 'AWAIT_PRODUCT'; at: number; items: CartItem[] }
+  | { step: 'CART'; at: number; items: CartItem[] }
+  | { step: 'AWAIT_NAME'; at: number; items: CartItem[]; address?: string; pin?: string }
+  | { step: 'AWAIT_ADDRESS'; at: number; items: CartItem[] }
+  | { step: 'AWAIT_CONFIRM'; at: number; items: CartItem[]; address: string; pin: string }
   | { step: 'AWAIT_DONATION_AMOUNT'; at: number }
   | { step: 'AWAIT_DONATION_NAME'; at: number; amount: number };
 
@@ -55,10 +60,13 @@ function productImage(p: ProductRow): BotReply['image'] {
 
 async function readState(conversationId: string): Promise<State | null> {
   const c = await db.conversation.findUnique({ where: { id: conversationId }, select: { state: true } });
-  const s = c?.state as State | null;
-  if (!s || typeof s !== 'object' || !('step' in s)) return null;
-  if (Date.now() - Number(s.at || 0) > STATE_TTL_MS) { await writeState(conversationId, null); return null; }
-  return s;
+  const raw = c?.state as any;
+  if (!raw || typeof raw !== 'object' || !('step' in raw)) return null;
+  if (Date.now() - Number(raw.at || 0) > STATE_TTL_MS) { await writeState(conversationId, null); return null; }
+  // Older sessions stored a single product; upgrade them to a one-line cart.
+  if (!Array.isArray(raw.items) && raw.productId) raw.items = [{ productId: raw.productId, qty: Number(raw.quantity) || 1 }];
+  if (['AWAIT_PRODUCT', 'CART', 'AWAIT_NAME', 'AWAIT_ADDRESS', 'AWAIT_CONFIRM'].includes(raw.step) && !Array.isArray(raw.items)) raw.items = [];
+  return raw as State;
 }
 async function writeState(conversationId: string, state: State | null) {
   await db.conversation.update({ where: { id: conversationId }, data: { state: state ? (state as unknown as Prisma.InputJsonValue) : Prisma.DbNull } });
@@ -77,14 +85,20 @@ async function loadProducts(): Promise<ProductRow[]> {
 const list = (c: Ctx, intent: string, spec: Omit<Extract<InteractiveSpec, { kind: 'list' }>, 'kind'>): BotReply => ({ intent, text: spec.body, interactive: { kind: 'list', ...spec } });
 const buttons = (intent: string, body: string, btns: { id: string; title: string }[]): BotReply => ({ intent, text: body, interactive: { kind: 'buttons', body, buttons: btns } });
 
-function socialLinks(): string[] {
+/** Social links entered by the admin (Admin > Social Links), in a fixed order. */
+async function socialLines(): Promise<string[]> {
+  const s = await getSocialLinks();
   const out: string[] = [];
-  if (env.TRUST_YOUTUBE_URL) out.push(`▶️ YouTube: ${env.TRUST_YOUTUBE_URL}`);
-  if (env.TRUST_FACEBOOK_URL) out.push(`📘 Facebook: ${env.TRUST_FACEBOOK_URL}`);
-  if (env.TRUST_INSTAGRAM_URL) out.push(`📸 Instagram: ${env.TRUST_INSTAGRAM_URL}`);
-  if (env.TRUST_WHATSAPP_COMMUNITY_URL) out.push(`💬 WhatsApp: ${env.TRUST_WHATSAPP_COMMUNITY_URL}`);
+  if (s.instagram) out.push(`📸 Instagram: ${s.instagram}`);
+  if (s.facebook) out.push(`📘 Facebook: ${s.facebook}`);
+  if (s.whatsappGroup) out.push(`💬 WhatsApp: ${s.whatsappGroup}`);
+  if (s.youtube) out.push(`▶️ YouTube: ${s.youtube}`);
   return out;
 }
+
+/** Trusts the admin added besides Amrit Vela Trust (for example Nanak Roti Trust). */
+const activeTrusts = () => db.trust.findMany({ where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] });
+const activeDocuments = () => db.document.findMany({ where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }], select: { id: true, title: true, description: true } });
 
 /** First message of a new conversation: welcome + language list (shown in all scripts, since the language is not known yet). */
 function languageMenu(c: Ctx): BotReply {
@@ -94,26 +108,31 @@ function languageMenu(c: Ctx): BotReply {
   });
 }
 
-function mainMenu(c: Ctx, prefix?: string): BotReply {
-  const trust = [
-    { id: 'menu:info', title: T(c, 'm_info'), description: T(c, 'm_info_d') },
+async function mainMenu(c: Ctx, prefix?: string): Promise<BotReply> {
+  const [trusts, social, docs] = await Promise.all([activeTrusts(), socialLines(), activeDocuments()]);
+  const trustRows = [
+    trusts.length
+      ? { id: 'menu:info', title: T(c, 'm_trusts'), description: T(c, 'm_trusts_d') }
+      : { id: 'menu:info', title: T(c, 'm_info'), description: T(c, 'm_info_d') },
     { id: 'menu:donate', title: T(c, 'm_donate'), description: T(c, 'm_donate_d') },
     { id: 'menu:contact', title: T(c, 'm_contact') },
   ];
-  if (socialLinks().length) trust.push({ id: 'menu:social', title: T(c, 'm_social') });
+  if (social.length) trustRows.push({ id: 'menu:social', title: T(c, 'm_social') });
+  const helpRows = [
+    ...(docs.length ? [{ id: 'menu:docs', title: T(c, 'm_docs'), description: T(c, 'm_docs_d') }] : []),
+    { id: 'menu:human', title: T(c, 'm_human') },
+    { id: 'menu:lang', title: T(c, 'm_lang') },
+  ];
   return list(c, 'MENU', {
     body: `${prefix ? `${prefix}\n\n` : ''}${T(c, 'menu_body')}`, button: T(c, 'menu_button'),
     sections: [
-      { title: T(c, 'sec_trust'), rows: trust },
+      { title: T(c, 'sec_trust'), rows: trustRows },
       { title: T(c, 'sec_shop'), rows: [
         { id: 'menu:products', title: T(c, 'm_products'), description: T(c, 'm_products_d') },
         { id: 'menu:status', title: T(c, 'm_status') },
         { id: 'menu:receipt', title: T(c, 'm_receipt') },
       ] },
-      { title: T(c, 'sec_help'), rows: [
-        { id: 'menu:human', title: T(c, 'm_human') },
-        { id: 'menu:lang', title: T(c, 'm_lang') },
-      ] },
+      { title: T(c, 'sec_help'), rows: helpRows },
     ],
   });
 }
@@ -128,23 +147,85 @@ function topicsMenu(c: Ctx): BotReply {
   });
 }
 
-function topicReply(c: Ctx, topic: Topic): BotReply {
-  return buttons('INFO', `${T(c, `tx_${topic}` as MessageKey)}\n\n${T(c, 'after_topic')}`, [
-    { id: 'menu:donate', title: T(c, 'b_donate') }, { id: 'menu:info', title: T(c, 'b_more') }, { id: 'menu:main', title: T(c, 'b_menu') },
-  ]);
+async function topicReply(c: Ctx, topic: Topic): Promise<BotReply> {
+  const more = (await activeTrusts()).length ? { id: 'menu:info', title: T(c, 'b_trusts') } : { id: 'menu:info', title: T(c, 'b_more') };
+  return buttons('INFO', `${T(c, `tx_${topic}` as MessageKey)}\n\n${T(c, 'after_topic')}`, [{ id: 'menu:donate', title: T(c, 'b_donate') }, more, { id: 'menu:main', title: T(c, 'b_menu') }]);
 }
 
 function contactReply(c: Ctx): BotReply {
-  const social = socialLinks();
-  return buttons('CONTACT', `${T(c, 'tx_contact')}${social.length ? `\n\n${social.join('\n')}` : ''}`, [
-    { id: 'menu:donate', title: T(c, 'b_donate') }, { id: 'menu:info', title: T(c, 'b_more') }, { id: 'menu:main', title: T(c, 'b_menu') },
-  ]);
+  return buttons('CONTACT', T(c, 'tx_contact'), [{ id: 'menu:donate', title: T(c, 'b_donate') }, { id: 'menu:info', title: T(c, 'b_more') }, { id: 'menu:main', title: T(c, 'b_menu') }]);
 }
 
-function socialReply(c: Ctx): BotReply {
-  const social = socialLinks();
+async function socialReply(c: Ctx): Promise<BotReply> {
+  const social = await socialLines();
   if (!social.length) return { intent: 'SOCIAL', text: T(c, 'social_none') };
   return buttons('SOCIAL', `${T(c, 'tx_social')}\n\n${social.join('\n')}`, [{ id: 'menu:main', title: T(c, 'b_menu') }]);
+}
+
+/** "Which Trust?" list: the built-in Amrit Vela Trust plus every active trust from the admin panel. */
+async function trustsMenu(c: Ctx, purpose: 'info' | 'donate'): Promise<BotReply> {
+  const trusts = await activeTrusts();
+  if (!trusts.length) return purpose === 'info' ? topicsMenu(c) : donationMenu(c);
+  const prefix = purpose === 'info' ? 'trust' : 'dtrust';
+  return list(c, purpose === 'info' ? 'TRUSTS' : 'DONATE_WHICH', {
+    body: T(c, purpose === 'info' ? 'trusts_body' : 'donate_which_body'), button: T(c, 'trusts_button'),
+    sections: [{ title: T(c, 'trusts_section'), rows: [
+      { id: `${prefix}:amritvela`, title: 'Amrit Vela Trust', description: T(c, purpose === 'info' ? 'trust_av_d' : 'donate_av_d') },
+      ...trusts.map((x) => ({ id: `${prefix}:${x.slug}`, title: x.name, description: T(c, purpose === 'info' ? 'trust_row_d' : 'donate_qr_d') })),
+    ] }],
+  });
+}
+
+const infoFor = (tr: { infoEn: string; infoHi: string | null; infoHing: string | null; infoPa: string | null }, lang: Lang) =>
+  (lang === 'hi' ? tr.infoHi : lang === 'hing' ? tr.infoHing : lang === 'pa' ? tr.infoPa : null)?.trim() || tr.infoEn.trim();
+
+/** Information about an admin-managed trust + the QR code donors scan to pay by PhonePe / any UPI app. */
+async function managedTrustReply(c: Ctx, slug: string): Promise<BotReply> {
+  const tr = await db.trust.findFirst({ where: { slug, active: true } });
+  if (!tr) return { intent: 'TRUST', text: T(c, 'trust_gone') };
+  const lines = [`*${tr.name}*`, '', infoFor(tr, c.lang)];
+  const extra: string[] = [];
+  if (tr.upiId) extra.push(T(c, 'trust_upi_line', { upi: tr.upiId }));
+  if (tr.contactPhone) extra.push(`📞 ${tr.contactPhone}`);
+  if (tr.contactEmail) extra.push(`✉️ ${tr.contactEmail}`);
+  if (extra.length) lines.push('', ...extra);
+  const qr = toWhatsAppImageUrl(tr.qrImageUrl);
+  if (!qr) lines.push('', T(c, 'trust_no_qr', { support: tr.contactPhone ? `📞 ${tr.contactPhone}` : t(c.lang, 'support') }));
+  const reply = buttons('TRUST', lines.join('\n'), [{ id: 'menu:info', title: T(c, 'b_trusts') }, { id: 'menu:donate', title: T(c, 'b_donate') }, { id: 'menu:main', title: T(c, 'b_menu') }]);
+  return qr ? { ...reply, image: { url: qr, caption: T(c, 'trust_qr_note', { name: tr.name }) } } : reply;
+}
+
+/** Customer typed the name of an admin-managed trust ("nanak roti trust"). */
+async function matchTrust(text: string) {
+  const n = normalize(text).replace(/\s+/g, '');
+  if (n.length < 4) return null;
+  const trusts = await activeTrusts();
+  return trusts.find((x) => { const name = normalize(x.name).replace(/\s+/g, ''); return name.length >= 4 && n.includes(name.replace(/trust$/, '')) && name.replace(/trust$/, '').length >= 4; }) ?? null;
+}
+
+async function docsMenu(c: Ctx): Promise<BotReply> {
+  const docs = await activeDocuments();
+  if (!docs.length) return { intent: 'DOCS', text: T(c, 'docs_none') };
+  return list(c, 'DOCS', {
+    body: T(c, 'docs_body'), button: T(c, 'docs_button'),
+    sections: [{ title: T(c, 'docs_section'), rows: docs.map((d) => ({ id: `doc:${d.id}`, title: d.title, ...(d.description ? { description: d.description } : {}) })) }],
+  });
+}
+
+/** Sends the PDF the customer picked (as a real WhatsApp document), or a download link on the website chat. */
+async function documentReply(c: Ctx, id: string): Promise<BotReply> {
+  const doc = await db.document.findFirst({ where: { id, active: true } });
+  if (!doc) return { intent: 'DOCS', text: T(c, 'doc_missing') };
+  const url = `${env.API_URL}/api/documents/${doc.id}/file`;
+  await db.document.update({ where: { id: doc.id }, data: { downloads: { increment: 1 } } }).catch(() => undefined);
+  if ((c.channel ?? 'whatsapp') === 'web') return { intent: 'DOCS', text: T(c, 'doc_web', { title: doc.title, url }) };
+  return {
+    intent: 'DOCS', text: T(c, 'doc_sending', { title: doc.title }),
+    after: async () => {
+      try { await sendWhatsAppPdf(c.phone, Buffer.from(doc.data), doc.fileName, doc.title); }
+      catch (e: any) { console.error('[BOT] Document send failed:', e?.message || e); await sendWhatsAppText(c.phone, T(c, 'doc_fail', { url })); }
+    },
+  };
 }
 
 const DONATION_AMOUNTS = [101, 501, 1100, 2100, 5100];
@@ -198,7 +279,7 @@ export async function routeWhatsAppMessage(input: RouteInput): Promise<BotReply 
   if (isCancelOrMenu(text) || (inConfirm && isNo(text))) {
     const wasActive = Boolean(state);
     await writeState(c.conversationId, null);
-    return wasActive ? { intent: 'CANCEL', text: T(c, 'cancelled_ok') } : mainMenu(c);
+    return wasActive ? { intent: 'CANCEL', text: T(c, state && (state.step === 'CART' || state.step === 'AWAIT_PRODUCT') && state.items.length ? 'cart_cleared' : 'cancelled_ok') } : mainMenu(c);
   }
 
   // Payment claims / receipt requests / explicit references. Never swallowed by a stale checkout state.
@@ -207,7 +288,7 @@ export async function routeWhatsAppMessage(input: RouteInput): Promise<BotReply 
   if (!addressInProgress && !confirmingAnswer) {
     const donRef = extractDonationRef(text);
     const ordRef = extractOrderRef(text);
-    const purchaseVerb = /kharid|khareed|buy|purchase|chahiye|chaiye|lena|mangwa|खरीद|चाहिए|खरेदी|हवे|ਖਰੀਦ|ਚਾਹੀਦਾ/i.test(text);
+    const purchaseVerb = /kharid|khareed|buy|purchase|chahiye|chaiye|lena|mangwa|खरीद|चाहिए|ਖਰੀਦ|ਚਾਹੀਦਾ/i.test(text);
     if (isReceiptRequest(text) || isPaymentClaim(text) || donRef || ordRef || (hasTrackIntent(text) && !purchaseVerb)) {
       const reply = await handlePaymentQuery(c, text, { donRef, ordRef });
       if (reply) return reply;
@@ -220,6 +301,14 @@ export async function routeWhatsAppMessage(input: RouteInput): Promise<BotReply 
   }
 
   if (hasDonationIntent(text)) return handleDonationStart(c, text);
+
+  const trust = await matchTrust(text);
+  if (trust) return managedTrustReply(c, trust.slug);
+  // "pdf chahiye" / "instagram link" are not product orders, unless the message also names a product.
+  if (hasSocialIntent(text) || hasDocsIntent(text)) {
+    const namesProduct = parseCartItems(text, await loadProducts()).items.length > 0;
+    if (!namesProduct) return hasSocialIntent(text) ? socialReply(c) : docsMenu(c);
+  }
 
   return handleShop(c, text);
 }
@@ -247,14 +336,17 @@ async function handleReplyId(c: Ctx, id: string): Promise<BotReply | null> {
     case 'menu': {
       switch (arg) {
         case 'main': await writeState(c.conversationId, null); return mainMenu(c);
-        case 'info': await writeState(c.conversationId, null); return topicsMenu(c);
+        case 'info': await writeState(c.conversationId, null); return trustsMenu(c, 'info');
         case 'contact': await writeState(c.conversationId, null); return contactReply(c);
         case 'social': await writeState(c.conversationId, null); return socialReply(c);
+        case 'docs': await writeState(c.conversationId, null); return docsMenu(c);
         case 'lang': await writeState(c.conversationId, null); return languageMenu(c);
         case 'human': return humanReply(c);
-        case 'donate': await writeState(c.conversationId, null); return donationMenu(c);
+        case 'donate': await writeState(c.conversationId, null); return trustsMenu(c, 'donate');
         case 'products': {
-          await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now() });
+          const state = await readState(c.conversationId);
+          const items = state && 'items' in state ? state.items : [];
+          await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now(), items });
           return productMenu(c, await loadProducts());
         }
         case 'status': return (await handlePaymentQuery(c, 'order status', { donRef: null, ordRef: null })) ?? { intent: 'PAYMENT_NONE', text: T(c, 'pay_none') };
@@ -262,11 +354,20 @@ async function handleReplyId(c: Ctx, id: string): Promise<BotReply | null> {
       }
       return null;
     }
+    case 'trust': {
+      await writeState(c.conversationId, null);
+      return arg === 'amritvelatrust' || arg === 'amritvela' ? topicsMenu(c) : managedTrustReply(c, arg);
+    }
+    case 'dtrust': {
+      await writeState(c.conversationId, null);
+      return arg === 'amritvela' ? donationMenu(c) : managedTrustReply(c, arg);
+    }
     case 'info': {
       if (!(TOPICS as readonly string[]).includes(arg)) return null;
       await writeState(c.conversationId, null);
       return topicReply(c, arg as Topic);
     }
+    case 'doc': return documentReply(c, arg);
     case 'amt': {
       if (arg === 'other') {
         await writeState(c.conversationId, { step: 'AWAIT_DONATION_AMOUNT', at: Date.now() });
@@ -277,20 +378,30 @@ async function handleReplyId(c: Ctx, id: string): Promise<BotReply | null> {
       return donationWithAmount(c, amount);
     }
     case 'prod': {
-      const product = (await loadProducts()).find((p) => p.id === arg);
+      const products = await loadProducts();
+      const product = products.find((p) => p.id === arg);
       if (!product) return { intent: 'SHOP', text: T(c, 'product_not_found') };
-      return startCheckout(c, product, 1);
+      const state = await readState(c.conversationId);
+      const items = state && 'items' in state ? state.items : [];
+      // Tapping a product adds one more of it to the cart.
+      const existing = items.find((x) => x.productId === product.id);
+      return applyToCart(c, items, [{ product, qty: existing ? existing.qty + 1 : 1 }], [], products, { mode: 'cart' });
+    }
+    case 'cart': {
+      const state = await readState(c.conversationId);
+      const items = state && 'items' in state ? state.items : [];
+      if (arg === 'clear') { await writeState(c.conversationId, null); return { intent: 'CANCEL', text: T(c, 'cart_cleared') }; }
+      if (!items.length) return productMenu(c, await loadProducts());
+      if (arg === 'more') { await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now(), items }); return productMenu(c, await loadProducts()); }
+      if (arg === 'checkout') return checkoutStep(c, items, await loadProducts());
+      return null;
     }
     case 'cfm': {
       const state = await readState(c.conversationId);
       if (state?.step !== 'AWAIT_CONFIRM') return mainMenu(c); // stale button from an expired session
-      if (arg === 'yes') {
-        const product = (await loadProducts()).find((p) => p.id === state.productId);
-        if (!product) { await writeState(c.conversationId, null); return { intent: 'SHOP', text: T(c, 'product_not_found') }; }
-        return placeOrder(c, state, product);
-      }
+      if (arg === 'yes') return placeOrder(c, state);
       if (arg === 'addr') {
-        await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: state.productId, quantity: state.quantity });
+        await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), items: state.items });
         return { intent: 'SHOP', text: T(c, 'new_address') };
       }
       await writeState(c.conversationId, null);
@@ -437,77 +548,123 @@ async function orderStatusReply(c: Ctx, orderId: string, wantsInvoice: boolean):
   };
 }
 
+
+/* ------------------------------------------------------------------ cart + checkout */
+
+type Next = { mode: 'cart' | 'checkout'; keep?: { address: string; pin: string } };
+type Mention = CartMention<ProductRow>;
+
+function cartView(c: Ctx, items: CartItem[], products: ProductRow[]) {
+  const rows = items.map((i) => ({ p: products.find((x) => x.id === i.productId), qty: i.qty })).filter((r): r is { p: ProductRow; qty: number } => Boolean(r.p));
+  const subtotal = rows.reduce((n, r) => n + r.p.price * r.qty, 0);
+  const lines = rows.map((r) => `• ${r.p.name} x ${r.qty} — ${money(r.p.price * r.qty)}`).join('\n');
+  return { rows, subtotal, lines, fee: shippingFor(subtotal), example: rows[0]?.p.name ?? 'Nariyal' };
+}
+
+/** Adds / changes / removes products in the cart, then shows the cart or moves on to checkout. */
+async function applyToCart(c: Ctx, items: CartItem[], mentions: Mention[], removed: ProductRow[], products: ProductRow[], next: Next): Promise<BotReply> {
+  const hadItems = items.length > 0;
+  const cart = items.filter((x) => products.some((p) => p.id === x.productId)).map((x) => ({ ...x }));
+  const notices: string[] = [];
+  for (const m of mentions) {
+    const p = m.product;
+    const existing = cart.find((x) => x.productId === p.id);
+    const qty = m.qty ?? (existing ? existing.qty : 1);
+    if (p.stock < 1) return { intent: 'SHOP', text: T(c, 'out_of_stock', { name: p.name }) };
+    if (qty > p.stock) return { intent: 'SHOP', text: T(c, 'qty_too_many', { name: p.name }) };
+    if (existing) { if (existing.qty !== qty) { existing.qty = qty; notices.push(T(c, 'notice_updated', { name: p.name, qty })); } }
+    else {
+      if (cart.length >= MAX_CART_LINES) return { intent: 'SHOP', text: T(c, 'cart_limit') };
+      cart.push({ productId: p.id, qty }); notices.push(T(c, 'notice_added', { name: p.name, qty }));
+    }
+  }
+  for (const r of removed) {
+    const at = cart.findIndex((x) => x.productId === r.id);
+    if (at >= 0) { cart.splice(at, 1); notices.push(T(c, 'notice_removed', { name: r.name })); }
+  }
+  if (!cart.length) {
+    await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now(), items: [] });
+    return productMenu(c, products);
+  }
+  const show = next.mode === 'cart' || hadItems ? notices : [];
+  const image = cart.length === 1 && !hadItems ? productImage(products.find((p) => p.id === cart[0].productId)!) : undefined;
+  return next.mode === 'cart' ? cartReply(c, cart, products, show, image) : checkoutStep(c, cart, products, next.keep, show, image);
+}
+
+async function cartReply(c: Ctx, items: CartItem[], products: ProductRow[], notices: string[] = [], image?: BotReply['image']): Promise<BotReply> {
+  await writeState(c.conversationId, { step: 'CART', at: Date.now(), items });
+  const v = cartView(c, items, products);
+  const body = `${notices.length ? `${notices.join('\n')}\n\n` : ''}${T(c, 'cart_body', { lines: v.lines, subtotal: money(v.subtotal), example: v.example })}`;
+  return { ...buttons('CART', body, [{ id: 'cart:checkout', title: T(c, 'b_checkout') }, { id: 'cart:more', title: T(c, 'b_add_more') }, { id: 'cart:clear', title: T(c, 'b_clear') }]), ...(image ? { image } : {}) };
+}
+
+/** Next missing piece of the order: name -> address -> confirmation. */
+async function checkoutStep(c: Ctx, items: CartItem[], products: ProductRow[], keep?: { address: string; pin: string }, notices: string[] = [], image?: BotReply['image']): Promise<BotReply> {
+  const v = cartView(c, items, products);
+  if (!v.rows.length) return productMenu(c, products);
+  const head = notices.length ? `${notices.join('\n')}\n\n` : '';
+  const user = await db.user.findUnique({ where: { phone: c.phone } });
+  if (!user?.name) {
+    await writeState(c.conversationId, { step: 'AWAIT_NAME', at: Date.now(), items, ...(keep || {}) });
+    return { intent: 'SHOP', ...(image ? { image } : {}), text: `${head}${T(c, 'ask_name_cart', { lines: v.lines })}` };
+  }
+  if (keep) return confirmationReply(c, items, products, user.name, keep.address, keep.pin, notices);
+  await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), items });
+  return { intent: 'SHOP', ...(image ? { image } : {}), text: `${head}${T(c, 'ask_address_cart', { lines: v.lines, subtotal: money(v.subtotal), fee: v.fee === 0 ? T(c, 'fee_free') : money(v.fee), example: v.example })}` };
+}
+
+async function confirmationReply(c: Ctx, items: CartItem[], products: ProductRow[], name: string, address: string, pin: string, notices: string[] = []): Promise<BotReply> {
+  await writeState(c.conversationId, { step: 'AWAIT_CONFIRM', at: Date.now(), items, address, pin });
+  const v = cartView(c, items, products);
+  const body = `${notices.length ? `${notices.join('\n')}\n\n` : ''}${T(c, 'confirm_summary', { lines: v.lines, price: money(v.subtotal), fee: money(v.fee), total: money(v.subtotal + v.fee), name, address })}`;
+  return buttons('SHOP_CONFIRM', body, [{ id: 'cfm:yes', title: T(c, 'b_confirm') }, { id: 'cfm:addr', title: T(c, 'b_address') }, { id: 'cfm:no', title: T(c, 'b_cancel') }]);
+}
+
 /* ------------------------------------------------------------------ shop (stateless entry) */
+
+const normalizeBare = (s: string) => s.toLowerCase().replace(/[^a-z0-9\u0900-\u097f\u0a00-\u0a7f]+/g, '');
 
 async function handleShop(c: Ctx, text: string): Promise<BotReply | null> {
   const products = await loadProducts();
-  const { wanted, negated, spans } = findProducts(text, products);
+  const { items: mentions, removed } = parseCartItems(text, products);
 
-  if (wanted.length > 1) return { intent: 'SHOP', text: T(c, 'shop_multi', { names: wanted.map((p) => p.name).join(', ') }) };
-  if (wanted.length === 1) {
-    const p = wanted[0];
-    if (hasPhotoIntent(text) && !hasBuyIntent(text)) {
-      const image = productImage(p);
-      const hint = p.stock > 0 ? ` ${T(c, 'order_hint', { name: p.name })}` : '';
-      return { intent: 'SHOP', image, text: image ? `${stockHint(c, p)}${hint}` : `${T(c, 'photo_none', { name: p.name })} ${stockHint(c, p)}${hint}` };
+  if (mentions.length) {
+    const buy = hasBuyIntent(text);
+    const single = mentions.length === 1 ? mentions[0].product : null;
+    if (single && hasPhotoIntent(text) && !buy) {
+      const image = productImage(single);
+      const hint = single.stock > 0 ? ` ${T(c, 'order_hint', { name: single.name })}` : '';
+      return { intent: 'SHOP', image, text: image ? `${stockHint(c, single)}${hint}` : `${T(c, 'photo_none', { name: single.name })} ${stockHint(c, single)}${hint}` };
     }
-    if (hasBuyIntent(text)) return startCheckout(c, p, parseQuantity(text, spans.get(p.id)));
-    if (hasPriceIntent(text)) return { intent: 'SHOP', image: productImage(p), text: `${stockHint(c, p)}${p.stock > 0 ? ` ${T(c, 'order_hint', { name: p.name })}` : ''}` };
-    // Just the product name on its own means "I want this".
-    if (normalizeBare(text) === normalizeBare(p.name)) return startCheckout(c, p, 1);
+    if (!buy && hasPriceIntent(text)) {
+      const first = mentions.find((m) => m.product.stock > 0)?.product;
+      return { intent: 'SHOP', image: mentions.length === 1 ? productImage(mentions[0].product) : undefined, text: `${mentions.map((m) => stockHint(c, m.product)).join('\n')}${first ? `\n${T(c, 'order_hint', { name: first.name })}` : ''}` };
+    }
+    const bare = mentions.length === 1 && normalizeBare(text) === normalizeBare(mentions[0].product.name);
+    if (buy || mentions.length > 1 || mentions.some((m) => m.qty !== null) || bare) return applyToCart(c, [], mentions, removed, products, { mode: 'checkout' });
     return null;
   }
-  if (negated.length && hasBuyIntent(text)) {
-    await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now() });
+  if (removed.length && hasBuyIntent(text)) {
+    await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now(), items: [] });
     return productMenu(c, products);
   }
-  if (hasCatalogIntent(text) || (hasBuyIntent(text) && /order|kharid|khareed|buy|purchase|चाहिए|खरीद|ऑर्डर|खरेदी|ਖਰੀਦ|ਆਰਡਰ|product|saman/i.test(text) && !hasDonationIntent(text))) {
-    await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now() });
+  if (hasCatalogIntent(text) || (hasBuyIntent(text) && /order|kharid|khareed|buy|purchase|चाहिए|खरीद|ऑर्डर|ਖਰੀਦ|ਆਰਡਰ|product|saman/i.test(text) && !hasDonationIntent(text))) {
+    await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now(), items: [] });
     return productMenu(c, products);
   }
   return null;
 }
 
-const normalizeBare = (s: string) => s.toLowerCase().replace(/[^a-z0-9\u0900-\u097f\u0a00-\u0a7f]+/g, '');
-
-async function startCheckout(c: Ctx, p: ProductRow, quantity: number, keep?: { address: string; pin: string }): Promise<BotReply> {
-  if (p.stock < 1) return { intent: 'SHOP', text: T(c, 'out_of_stock', { name: p.name }) };
-  if (quantity > p.stock) return { intent: 'SHOP', text: T(c, 'qty_too_many', { name: p.name }) };
-  const user = await db.user.findUnique({ where: { phone: c.phone } });
-  if (!user?.name) {
-    await writeState(c.conversationId, { step: 'AWAIT_NAME', at: Date.now(), productId: p.id, quantity, ...(keep || {}) });
-    return { intent: 'SHOP', image: productImage(p), text: T(c, 'ask_name_product', { name: p.name, qty: quantity, price: money(p.price) }) };
-  }
-  if (keep) return confirmationReply(c, p, quantity, user.name, keep.address, keep.pin);
-  await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: p.id, quantity });
-  const subtotal = p.price * quantity;
-  const fee = shippingFor(subtotal);
-  return { intent: 'SHOP', image: productImage(p), text: T(c, 'ask_address', { name: p.name, qty: quantity, subtotal: money(subtotal), fee: fee === 0 ? T(c, 'fee_free') : money(fee) }) };
-}
-
-async function confirmationReply(c: Ctx, p: ProductRow, quantity: number, name: string, address: string, pin: string): Promise<BotReply> {
-  await writeState(c.conversationId, { step: 'AWAIT_CONFIRM', at: Date.now(), productId: p.id, quantity, address, pin });
-  const subtotal = p.price * quantity;
-  const fee = shippingFor(subtotal);
-  const body = T(c, 'confirm_summary', { product: p.name, qty: quantity, price: money(subtotal), fee: money(fee), total: money(subtotal + fee), name, address });
-  return { ...buttons('SHOP_CONFIRM', body, [
-    { id: 'cfm:yes', title: T(c, 'b_confirm') }, { id: 'cfm:addr', title: T(c, 'b_address') }, { id: 'cfm:no', title: T(c, 'b_cancel') },
-  ]) };
-}
-
 /* ------------------------------------------------------------------ state machine */
 
 async function handleState(c: Ctx, text: string, state: State): Promise<BotReply | null> {
-  const products = state.step.startsWith('AWAIT_DONATION') ? [] : await loadProducts();
-  const stateProduct = 'productId' in state ? products.find((p) => p.id === state.productId) : undefined;
-
   switch (state.step) {
     case 'AWAIT_DONATION_AMOUNT': {
       const parsed = parseAmount(text, { allowBare: true });
       if (parsed.amount != null) return donationWithAmount(c, parsed.amount);
       if (parsed.reason === 'decimal' || parsed.reason === 'range') return handleDonationStart(c, text, true);
       // A product message while waiting for an amount: leave donation mode.
-      if (findProducts(text, await loadProducts()).wanted.length || hasBuyIntent(text) || hasCatalogIntent(text)) { await writeState(c.conversationId, null); return null; }
+      if (parseCartItems(text, await loadProducts()).items.length || hasBuyIntent(text) || hasCatalogIntent(text)) { await writeState(c.conversationId, null); return null; }
       return { intent: 'DONATION_AMOUNT', text: T(c, 'donate_amount_retry') };
     }
 
@@ -518,85 +675,97 @@ async function handleState(c: Ctx, text: string, state: State): Promise<BotReply
       return createDonationReply(c, state.amount);
     }
 
-    case 'AWAIT_PRODUCT': {
-      const { wanted, spans } = findProducts(text, products);
-      if (wanted.length > 1) return { intent: 'SHOP', text: T(c, 'shop_multi', { names: wanted.map((p) => p.name).join(', ') }) };
-      if (wanted.length === 1) return startCheckout(c, wanted[0], parseQuantity(text, spans.get(wanted[0].id)));
+    case 'AWAIT_PRODUCT':
+    case 'CART': {
+      const products = await loadProducts();
+      const { items: mentions, removed } = parseCartItems(text, products);
+      if (mentions.length || removed.length) return applyToCart(c, state.items, mentions, removed, products, { mode: 'cart' });
       if (hasDonationIntent(text)) { await writeState(c.conversationId, null); return null; }
+      if (state.step === 'CART') {
+        if (isYes(text) && state.items.length) return checkoutStep(c, state.items, products);
+        if (hasCatalogIntent(text)) { await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now(), items: state.items }); return productMenu(c, products); }
+        return null; // not about the cart: let the normal routing answer (the cart stays for 30 minutes)
+      }
+      if (normalize(text).split(' ').length > 4) return null;
       const menu = productMenu(c, products);
-      return { ...menu, text: `${T(c, 'product_not_found')}\n\n${menu.text}`, interactive: menu.interactive && menu.interactive.kind === 'list' ? { ...menu.interactive, body: `${T(c, 'product_not_found')}\n\n${menu.interactive.body}` } : menu.interactive };
+      const lead = T(c, 'product_not_found');
+      return { ...menu, text: `${lead}\n\n${menu.text}`, interactive: menu.interactive && menu.interactive.kind === 'list' ? { ...menu.interactive, body: `${lead}\n\n${menu.interactive.body}` } : menu.interactive };
     }
 
     case 'AWAIT_NAME':
     case 'AWAIT_ADDRESS':
     case 'AWAIT_CONFIRM': {
-      if (!stateProduct || stateProduct.stock < 1) {
+      const products = await loadProducts();
+      // Drop lines whose product disappeared or sold out while the customer was typing.
+      const live = state.items.filter((i) => { const p = products.find((x) => x.id === i.productId); return p && p.stock >= 1; });
+      if (!live.length) {
         await writeState(c.conversationId, null);
         const menu = productMenu(c, products);
-        const gone = T(c, 'product_gone', { name: stateProduct?.name || '' }).trim();
+        const gone = T(c, 'cart_sold_out');
         return { ...menu, text: `${gone}\n\n${menu.text}`, interactive: menu.interactive && menu.interactive.kind === 'list' ? { ...menu.interactive, body: `${gone}\n\n${menu.interactive.body}` } : menu.interactive };
       }
-      const { wanted, spans } = findProducts(text, products);
+      const keep = state.step === 'AWAIT_CONFIRM' ? { address: state.address, pin: state.pin } : state.step === 'AWAIT_NAME' && state.address ? { address: state.address, pin: state.pin! } : undefined;
+      const check = validateAddress(text);
       const pin = extractPin(text);
+      const { items: mentions, removed } = parseCartItems(text, products);
+      const nameLike = state.step === 'AWAIT_NAME' && !hasBuyIntent(text) && mentions.length <= 1 && mentions.every((m) => m.qty === null); // a customer may be called "Mala"
 
-      // Customer changes their mind about the product mid-checkout ("order Nariyal").
-      if (wanted.length > 1) return { intent: 'SHOP', text: T(c, 'shop_multi', { names: wanted.map((p) => p.name).join(', ') }) };
-      if (wanted.length === 1 && (wanted[0].id !== state.productId || !pin)) {
-        const keep = state.step === 'AWAIT_CONFIRM' ? { address: state.address, pin: state.pin } : state.step === 'AWAIT_NAME' && state.address ? { address: state.address, pin: state.pin! } : undefined;
-        return startCheckout(c, wanted[0], parseQuantity(text, spans.get(wanted[0].id)), keep);
+      // The customer edits the cart while checking out ("also 2 gangajal", "mala nahi"). An address with a PIN always wins.
+      if ((mentions.length || removed.length) && !(check.ok && pin) && !nameLike) {
+        return applyToCart(c, live, mentions, removed, products, { mode: 'checkout', keep });
       }
 
       if (state.step === 'AWAIT_NAME') {
         const name = validateName(text);
         if (!name.ok) return { intent: 'SHOP', text: T(c, 'name_retry') };
         await db.user.update({ where: { phone: c.phone }, data: { name: name.name } });
-        if (state.address && state.pin) return confirmationReply(c, stateProduct, state.quantity, name.name, state.address, state.pin);
-        await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: state.productId, quantity: state.quantity });
+        if (state.address && state.pin) return confirmationReply(c, live, products, name.name, state.address, state.pin);
+        await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), items: live });
         return { intent: 'SHOP', text: T(c, 'name_then_address') };
       }
 
       const qty = parseExplicitQuantity(text);
-      if (qty != null) {
-        if (qty > stateProduct.stock) return { intent: 'SHOP', text: T(c, 'qty_too_many', { name: stateProduct.name }) };
-        if (state.step === 'AWAIT_CONFIRM') {
-          const u = await db.user.findUnique({ where: { phone: c.phone } });
-          return confirmationReply(c, stateProduct, qty, u?.name || T(c, 'customer_default'), state.address, state.pin);
-        }
-        await writeState(c.conversationId, { ...state, quantity: qty, at: Date.now() });
-        return { intent: 'SHOP', text: T(c, 'qty_set', { qty }) };
+      if (qty != null && live.length === 1) {
+        const p = products.find((x) => x.id === live[0].productId)!;
+        if (qty > p.stock) return { intent: 'SHOP', text: T(c, 'qty_too_many', { name: p.name }) };
+        return applyToCart(c, live, [{ product: p, qty }], [], products, { mode: 'checkout', keep });
       }
 
-      if (state.step === 'AWAIT_CONFIRM' && isYes(text)) return placeOrder(c, state, stateProduct);
-      if (state.step === 'AWAIT_CONFIRM' && /address|pata|badal|change|पता|पत्ता|ਪਤਾ|बदल|ਬਦਲ/i.test(text) && !pin) {
-        await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), productId: state.productId, quantity: state.quantity });
+      if (state.step === 'AWAIT_CONFIRM' && isYes(text)) return placeOrder(c, { ...state, items: live });
+      if (state.step === 'AWAIT_CONFIRM' && /address|pata|badal|change|पता|ਪਤਾ|बदल|ਬਦਲ/i.test(text) && !pin) {
+        await writeState(c.conversationId, { step: 'AWAIT_ADDRESS', at: Date.now(), items: live });
         return { intent: 'SHOP', text: T(c, 'new_address') };
       }
 
-      const check = validateAddress(text);
       if (!check.ok) {
         if (state.step === 'AWAIT_CONFIRM') return { intent: 'SHOP', text: T(c, 'confirm_hint') };
         return { intent: 'SHOP', text: T(c, check.reason) };
       }
       const u = await db.user.findUnique({ where: { phone: c.phone } });
       if (!u?.name) {
-        await writeState(c.conversationId, { step: 'AWAIT_NAME', at: Date.now(), productId: state.productId, quantity: state.quantity, address: check.address, pin: check.pin });
+        await writeState(c.conversationId, { step: 'AWAIT_NAME', at: Date.now(), items: live, address: check.address, pin: check.pin });
         return { intent: 'SHOP', text: T(c, 'address_then_name') };
       }
-      return confirmationReply(c, stateProduct, state.quantity, u.name, check.address, check.pin);
+      return confirmationReply(c, live, products, u.name, check.address, check.pin);
     }
   }
 }
 
-async function placeOrder(c: Ctx, state: Extract<State, { step: 'AWAIT_CONFIRM' }>, p: ProductRow): Promise<BotReply> {
-  const fresh = await db.product.findUnique({ where: { id: p.id } });
-  if (!fresh || !isSellable(fresh) || fresh.stock < state.quantity) {
-    await writeState(c.conversationId, null);
-    return { intent: 'SHOP', text: T(c, 'place_unavailable', { name: p.name, qty: state.quantity }) };
+async function placeOrder(c: Ctx, state: Extract<State, { step: 'AWAIT_CONFIRM' }>): Promise<BotReply> {
+  const fresh = await db.product.findMany({ where: { id: { in: state.items.map((i) => i.productId) } } });
+  const bad = state.items.filter((i) => { const p = fresh.find((x) => x.id === i.productId); return !p || !isSellable(p) || p.stock < i.qty; });
+  if (bad.length) {
+    const names = bad.map((i) => fresh.find((x) => x.id === i.productId)?.name || '—').join(', ');
+    const products = await loadProducts();
+    const keepItems = state.items.filter((i) => !bad.includes(i));
+    if (!keepItems.length) { await writeState(c.conversationId, null); return { intent: 'SHOP', text: T(c, 'cart_unavailable', { names }) }; }
+    return cartReply(c, keepItems, products, [T(c, 'cart_unavailable', { names })]);
   }
   const user = await db.user.findUnique({ where: { phone: c.phone } });
   if (!user) return { intent: 'SHOP', text: T(c, 'profile_missing') };
 
-  const subtotal = fresh.price * state.quantity;
+  const rows = state.items.map((i) => ({ p: fresh.find((x) => x.id === i.productId)!, qty: i.qty }));
+  const subtotal = rows.reduce((n, r) => n + r.p.price * r.qty, 0);
   const shippingFee = shippingFor(subtotal);
   const total = subtotal + shippingFee;
   const orderNumber = `ORD-${Date.now()}-${Math.floor(Math.random() * 900 + 100)}`;
@@ -605,7 +774,7 @@ async function placeOrder(c: Ctx, state: Extract<State, { step: 'AWAIT_CONFIRM' 
     data: {
       orderNumber, userId: user.id, subtotal, shippingFee, total,
       address: { full: state.address, pin: state.pin },
-      items: { create: [{ productId: fresh.id, quantity: state.quantity, unitPrice: fresh.price }] },
+      items: { create: rows.map((r) => ({ productId: r.p.id, quantity: r.qty, unitPrice: r.p.price })) },
     },
   });
   await db.user.update({ where: { id: user.id }, data: { address: { full: state.address, pin: state.pin } } }).catch(() => undefined);
@@ -617,10 +786,8 @@ async function placeOrder(c: Ctx, state: Extract<State, { step: 'AWAIT_CONFIRM' 
     await db.order.update({ where: { id: order.id }, data: { razorpayOrderId: String(link.id) } });
     await writeState(c.conversationId, null);
     if (String(link.id).startsWith('mock_')) return { intent: 'SHOP_ORDER', text: T(c, 'order_mock', { number: orderNumber }) };
-    return {
-      intent: 'SHOP_ORDER',
-      text: T(c, 'order_created', { number: orderNumber, product: fresh.name, qty: state.quantity, price: money(subtotal), fee: money(shippingFee), total: money(total), url }),
-    };
+    const lines = rows.map((r) => `• ${r.p.name} x ${r.qty} — ${money(r.p.price * r.qty)}`).join('\n');
+    return { intent: 'SHOP_ORDER', text: T(c, 'order_created', { number: orderNumber, lines, price: money(subtotal), fee: money(shippingFee), total: money(total), url }) };
   } catch (e: any) {
     console.error('[BOT] Order payment link failed:', e?.error?.description || e?.message || e);
     await db.order.update({ where: { id: order.id }, data: { status: 'CANCELLED', paymentStatus: 'FAILED' } }).catch(() => undefined);

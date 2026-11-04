@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { hasTrackIntent, findProducts, parseAmount, isPaymentClaim, isReceiptRequest, hasDonationIntent, hasBuyIntent, validateAddress, parseQuantity, isGreeting, isYes, isCancelOrMenu, validateName, extractPin } from '../src/services/bot-nlp';
+import { parseCartItems, hasTrackIntent, findProducts, parseAmount, isPaymentClaim, isReceiptRequest, hasDonationIntent, hasBuyIntent, validateAddress, parseQuantity, isGreeting, isYes, isCancelOrMenu, validateName, extractPin } from '../src/services/bot-nlp';
 
 const P = [
   { id: 'g', name: 'Gangajal' }, { id: 'm', name: 'Mala' }, { id: 'n', name: 'Nariyal' },
@@ -58,5 +58,18 @@ t('overlapping names: "Rudraksha Mala" beats "Mala"; plain "mala" still means Ma
   assert.deepEqual(findProducts('mala chahiye', Q).wanted.map((p) => p.name), ['Mala']);
   assert.deepEqual(findProducts('mala aur nariyal', Q).wanted.map((p) => p.name), ['Mala', 'Nariyal']);
   assert.deepEqual(findProducts('rudraksha mala nahi, nariyal chahiye', Q).wanted.map((p) => p.name), ['Nariyal']);
+});
+t('multi-product orders: quantities attach to the right product', () => {
+  const Q = [...P, { id: 'r', name: 'Rudraksha Mala' }];
+  const q = (txt: string) => parseCartItems(txt, Q).items.map((i) => `${i.product.name}:${i.qty}`).join(',');
+  assert.equal(q('2 nariyal 1 gangajal 3 mala chahiye'), 'Nariyal:2,Gangajal:1,Mala:3');
+  assert.equal(q('nariyal 2 gangajal 1 mala 3'), 'Nariyal:2,Gangajal:1,Mala:3');
+  assert.equal(q('nariyal aur gangajal'), 'Nariyal:null,Gangajal:null');
+  assert.equal(q('do nariyal teen mala'), 'Nariyal:2,Mala:3');
+  assert.equal(q('Nariyal x3, gangajal x2'), 'Nariyal:3,Gangajal:2');
+  assert.equal(q('1 rudraksha mala 2 nariyal'), 'Rudraksha Mala:1,Nariyal:2');
+  assert.equal(q('nariyal kharidna h'), 'Nariyal:null');
+  assert.deepEqual(parseCartItems('2 nariyal gangajal nahi', Q).removed.map((p) => p.name), ['Gangajal']);
+  assert.equal(q('2 nariyal gangajal nahi'), 'Nariyal:2');
 });
 console.log(`\n${n} tests passed`);

@@ -17,7 +17,7 @@ export default function PasswordInput({ value, onChange, placeholder = 'Password
         placeholder={placeholder} autoComplete={autoComplete}
       />
       <button
-        type="button" onClick={() => setVisible((v) => !v)} aria-label={visible ? 'Password chhupayein' : 'Password dikhayein'} aria-pressed={visible}
+        type="button" onClick={() => setVisible((v) => !v)} aria-label={visible ? 'Hide password' : 'Show password'} aria-pressed={visible}
         style={{ position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)', width: 36, height: 36, display: 'grid', placeItems: 'center', border: 0, background: 'transparent', cursor: 'pointer', color: '#6b7a71', borderRadius: 10 }}
       >
         {visible ? <EyeOff size={18} /> : <Eye size={18} />}

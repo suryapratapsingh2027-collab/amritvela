@@ -26,9 +26,9 @@ function Field({ label, hint, required, children }: { label: string; hint?: stri
 }
 
 function validate(f: FormState): string | null {
-  if (f.name.trim().length < 2) return 'Product ka naam likhein (kam se kam 2 akshar).';
-  if (!/^\d+$/.test(f.price.trim()) || Number(f.price) < 1) return 'Price poore rupaye me likhein, jaise 100.';
-  if (!/^\d+$/.test(f.stock.trim())) return 'Stock me poori sankhya likhein, jaise 25 (stock nahi hai to 0).';
+  if (f.name.trim().length < 2) return 'Enter the product name (at least 2 characters).';
+  if (!/^\d+$/.test(f.price.trim()) || Number(f.price) < 1) return 'Enter the price in whole rupees, for example 100.';
+  if (!/^\d+$/.test(f.stock.trim())) return 'Enter the stock as a whole number, for example 25 (0 if out of stock).';
   return null;
 }
 
@@ -49,50 +49,50 @@ function ProductForm({ product, onClose, onSaved }: { product?: Product; onClose
       else await api('/api/admin/products', { method: 'POST', body });
       onSaved();
     } catch (err: any) {
-      setError(err?.message || 'Save nahi ho paaya.');
+      setError(err?.message || 'Could not save the product.');
     } finally { setBusy(false); }
   }
 
   return (
     <form onSubmit={save} className="rounded-3xl border bg-white p-5 md:p-7" style={{ borderColor: '#c9d3cb' }}>
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-bold">{product ? `Edit: ${product.name}` : 'Naya product add karein'}</h2>
-        <button type="button" onClick={onClose} aria-label="Band karein" className="btn btn-light" style={{ padding: 10 }}><X size={16} /></button>
+        <h2 className="text-xl font-bold">{product ? `Edit: ${product.name}` : 'Add a new product'}</h2>
+        <button type="button" onClick={onClose} aria-label="Close" className="btn btn-light" style={{ padding: 10 }}><X size={16} /></button>
       </div>
-      <p className="mt-1 text-sm text-neutral-500">Jo bhi yahan likhenge wahi website aur WhatsApp bot par customers ko dikhega. * wale fields zaroori hain.</p>
+      <p className="mt-1 text-sm text-neutral-500">Whatever you enter here is shown to customers on the website and the WhatsApp bot. Fields marked * are required.</p>
 
       <div className="mt-6 grid gap-5 md:grid-cols-2">
-        <Field label="Product ka naam" required hint="Customers WhatsApp par yahi naam likhkar order karenge. Chhota aur saaf rakhein, jaise “Nariyal”.">
-          <input className="input" value={f.name} maxLength={80} onChange={(e) => set('name', e.target.value)} placeholder="Jaise: Nariyal" />
+        <Field label="Product name" required hint="Customers type this name on WhatsApp to order. Keep it short and clear, for example “Nariyal”.">
+          <input className="input" value={f.name} maxLength={80} onChange={(e) => set('name', e.target.value)} placeholder="e.g. Nariyal" />
         </Field>
-        <Field label="Price (₹ rupaye me)" required hint="Ek piece ki keemat, poore rupaye me, jaise 100. Delivery charge alag se jodi jaati hai.">
-          <input className="input" inputMode="numeric" value={f.price} onChange={(e) => set('price', e.target.value.replace(/[^\d]/g, ''))} placeholder="Jaise: 100" />
+        <Field label="Price (₹, whole rupees)" required hint="Price of one piece in whole rupees, for example 100. Delivery charge is added separately.">
+          <input className="input" inputMode="numeric" value={f.price} onChange={(e) => set('price', e.target.value.replace(/[^\d]/g, ''))} placeholder="e.g. 100" />
         </Field>
-        <Field label="Stock (kitne piece available hain)" required hint="0 likhne par product “out of stock” ho jaata hai aur WhatsApp par order nahi hoga. Customers ko stock ki sankhya nahi dikhti.">
-          <input className="input" inputMode="numeric" value={f.stock} onChange={(e) => set('stock', e.target.value.replace(/[^\d]/g, ''))} placeholder="Jaise: 25" />
+        <Field label="Stock (pieces available)" required hint="Enter 0 to mark the product “out of stock”; it can then not be ordered on WhatsApp. Customers never see the stock number.">
+          <input className="input" inputMode="numeric" value={f.stock} onChange={(e) => set('stock', e.target.value.replace(/[^\d]/g, ''))} placeholder="e.g. 25" />
         </Field>
-        <Field label="Category (optional)" hint="Jaise: Pooja, Mala, Apparel.">
-          <input className="input" value={f.category} maxLength={40} onChange={(e) => set('category', e.target.value)} placeholder="Jaise: Pooja" />
+        <Field label="Category (optional)" hint="For example: Pooja, Mala, Apparel.">
+          <input className="input" value={f.category} maxLength={40} onChange={(e) => set('category', e.target.value)} placeholder="e.g. Pooja" />
         </Field>
         <div className="md:col-span-2">
-          <Field label="Description (optional)" hint="Website par product ke neeche dikhegi. 1-2 line kaafi hai.">
-            <textarea className="input" style={{ minHeight: 96 }} maxLength={1000} value={f.description} onChange={(e) => set('description', e.target.value)} placeholder="Product ke baare me likhein…" />
+          <Field label="Description (optional)" hint="Shown below the product on the website. One or two lines is enough.">
+            <textarea className="input" style={{ minHeight: 96 }} maxLength={1000} value={f.description} onChange={(e) => set('description', e.target.value)} placeholder="Write about the product…" />
           </Field>
         </div>
         <div className="md:col-span-2">
-          <Field label="Product ki photo">
+          <Field label="Product photo">
             <ImageUploader value={f.imageUrl} onChange={(url) => set('imageUrl', url)} />
           </Field>
         </div>
         <label className="md:col-span-2" style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 14 }}>
           <input type="checkbox" checked={f.active} onChange={(e) => set('active', e.target.checked)} />
-          Website aur WhatsApp par dikhayein (band karne par product chhup jaata hai)
+          Show on the website and WhatsApp (when switched off the product is hidden)
         </label>
       </div>
 
       {error && <p role="alert" className="mt-4 rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</p>}
       <div className="mt-6 flex gap-3">
-        <button className="btn btn-dark" disabled={busy}>{busy ? 'Save ho raha hai…' : product ? 'Changes save karein' : 'Product add karein'}</button>
+        <button className="btn btn-dark" disabled={busy}>{busy ? 'Saving…' : product ? 'Save changes' : 'Add product'}</button>
         <button type="button" className="btn btn-light" onClick={onClose}>Cancel</button>
       </div>
     </form>
@@ -109,17 +109,17 @@ export default function ProductsAdmin({ products, reload }: { products: Product[
   }
 
   if (editing) {
-    return <ProductForm product={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); setNotice('Product save ho gaya. Ab yeh website aur WhatsApp par dikhega.'); await reload(); }} />;
+    return <ProductForm product={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); setNotice('Product saved. It is now live on the website and WhatsApp.'); await reload(); }} />;
   }
 
   return (
     <div className="rounded-3xl border bg-white p-5 md:p-7">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div><h2 className="text-xl font-bold">Product catalogue</h2><p className="text-sm text-neutral-500">{products.length} products</p></div>
-        <button onClick={() => { setNotice(''); setEditing('new'); }} className="btn btn-dark"><Plus size={16} /> Naya product</button>
+        <button onClick={() => { setNotice(''); setEditing('new'); }} className="btn btn-dark"><Plus size={16} /> New product</button>
       </div>
       {notice && <p role="status" className="mb-4 rounded-xl bg-[#eef5ef] p-3 text-sm text-[#1d4d36]">{notice}</p>}
-      {!products.length && <p className="py-10 text-center text-sm text-neutral-400">Abhi koi product nahi hai. “Naya product” dabakar pehla product add karein.</p>}
+      {!products.length && <p className="py-10 text-center text-sm text-neutral-400">No products yet. Click “New product” to add your first one.</p>}
       <div className="space-y-3">
         {products.map((p) => (
           <div key={p.id} className="flex flex-wrap items-center gap-4 rounded-2xl border p-3" style={{ opacity: p.active ? 1 : 0.62 }}>
@@ -131,13 +131,13 @@ export default function ProductsAdmin({ products, reload }: { products: Product[
               <div className="mt-1 text-sm text-neutral-500">₹{p.price.toLocaleString('en-IN')}{p.category ? ` · ${p.category}` : ''}</div>
               <div className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
                 <span className="rounded-full px-3 py-1" style={{ background: p.stock === 0 ? '#fde8e8' : p.stock < 5 ? '#fff3d6' : '#e8f3ec', color: p.stock === 0 ? '#b42318' : p.stock < 5 ? '#8a5a00' : '#1d5b3d' }}>{p.stock === 0 ? 'Out of stock' : `Stock: ${p.stock}`}</span>
-                {!p.active && <span className="rounded-full bg-neutral-200 px-3 py-1">Chhupa hua</span>}
-                {!p.imageUrl && <span className="rounded-full bg-neutral-100 px-3 py-1 text-neutral-500">Photo nahi</span>}
+                {!p.active && <span className="rounded-full bg-neutral-200 px-3 py-1">Hidden</span>}
+                {!p.imageUrl && <span className="rounded-full bg-neutral-100 px-3 py-1 text-neutral-500">No photo</span>}
               </div>
             </div>
             <div className="flex gap-2">
               <button className="btn btn-light" onClick={() => { setNotice(''); setEditing(p); }}><Pencil size={14} /> Edit</button>
-              <button className="btn btn-light" onClick={() => toggle(p)}>{p.active ? <><EyeOff size={14} /> Chhupayein</> : <><Eye size={14} /> Dikhayein</>}</button>
+              <button className="btn btn-light" onClick={() => toggle(p)}>{p.active ? <><EyeOff size={14} /> Hide</> : <><Eye size={14} /> Show</>}</button>
             </div>
           </div>
         ))}

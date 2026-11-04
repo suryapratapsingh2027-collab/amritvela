@@ -59,14 +59,14 @@ export default function SupportInbox() {
       setText('');
       await Promise.all([loadThread(selected), loadList()]);
     } catch (e: any) {
-      setError(e?.message || 'Message nahi bheja ja saka.'); // shown right under the box, with the real reason
+      setError(e?.message || 'The message could not be sent.'); // shown right under the box, with the real reason
     } finally { setSending(false); }
   }
 
   async function setMode(mode: 'AI' | 'HUMAN') {
     if (!selected) return;
     try { await api(`/api/admin/conversations/${selected}`, { method: 'PATCH', body: JSON.stringify({ mode }) }); await Promise.all([loadThread(selected), loadList()]); }
-    catch (e: any) { setError(e?.message || 'Mode badal nahi saka.'); }
+    catch (e: any) { setError(e?.message || 'Could not change the mode.'); }
   }
 
   const visible = list.filter((c) => (filter === 'needs' ? c.awaitingReply || c.openTickets > 0 : true));
@@ -78,11 +78,11 @@ export default function SupportInbox() {
         {/* conversation list */}
         <div className={`${selected ? 'hidden md:block' : ''} border-r`} style={{ maxHeight: 680, overflowY: 'auto' }}>
           <div className="flex gap-2 border-b p-3">
-            <button className={`btn ${filter === 'all' ? 'btn-dark' : 'btn-light'}`} style={{ padding: '8px 14px' }} onClick={() => setFilter('all')}>Sab ({list.length})</button>
-            <button className={`btn ${filter === 'needs' ? 'btn-dark' : 'btn-light'}`} style={{ padding: '8px 14px' }} onClick={() => setFilter('needs')}>Reply chahiye ({needs})</button>
+            <button className={`btn ${filter === 'all' ? 'btn-dark' : 'btn-light'}`} style={{ padding: '8px 14px' }} onClick={() => setFilter('all')}>All ({list.length})</button>
+            <button className={`btn ${filter === 'needs' ? 'btn-dark' : 'btn-light'}`} style={{ padding: '8px 14px' }} onClick={() => setFilter('needs')}>Needs reply ({needs})</button>
           </div>
           {loading && <p className="p-5 text-sm text-neutral-400">Loading…</p>}
-          {!loading && !visible.length && <p className="p-5 text-sm text-neutral-400">{filter === 'needs' ? 'Koi pending reply nahi. 🙏' : 'Abhi koi conversation nahi hai.'}</p>}
+          {!loading && !visible.length && <p className="p-5 text-sm text-neutral-400">{filter === 'needs' ? 'No pending replies. 🙏' : 'No conversations yet.'}</p>}
           {visible.map((c) => (
             <button key={c.id} onClick={() => setSelected(c.id)} className="block w-full border-b p-4 text-left hover:bg-neutral-50" style={{ background: selected === c.id ? '#f3f6f1' : undefined }}>
               <div className="flex items-center justify-between gap-2">
@@ -93,7 +93,7 @@ export default function SupportInbox() {
               <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] font-bold">
                 <span className="inline-flex items-center gap-1 rounded-full bg-neutral-100 px-2 py-1">{c.channel === 'WEB' ? <><Globe size={11} /> Website</> : <><MessageCircle size={11} /> WhatsApp</>}</span>
                 <span className="rounded-full px-2 py-1" style={{ background: c.mode === 'HUMAN' ? '#e3ecff' : '#eef2eb' }}>{c.mode === 'HUMAN' ? 'Team' : 'Bot'}</span>
-                {c.awaitingReply && <span className="rounded-full bg-red-100 px-2 py-1 text-red-700">Reply chahiye</span>}
+                {c.awaitingReply && <span className="rounded-full bg-red-100 px-2 py-1 text-red-700">Needs reply</span>}
               </div>
             </button>
           ))}
@@ -102,17 +102,17 @@ export default function SupportInbox() {
         {/* thread */}
         <div className={`${selected ? '' : 'hidden md:flex'} flex-col`} style={{ maxHeight: 680 }}>
           {!selected || !thread ? (
-            <div className="grid flex-1 place-items-center p-10 text-center text-sm text-neutral-400">{selected ? 'Loading…' : 'Left se koi conversation chunein.'}</div>
+            <div className="grid flex-1 place-items-center p-10 text-center text-sm text-neutral-400">{selected ? 'Loading…' : 'Select a conversation from the list.'}</div>
           ) : (
             <>
               <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4">
                 <div className="flex items-center gap-3">
-                  <button className="md:hidden" onClick={() => setSelected(null)} aria-label="Wapas"><ArrowLeft size={18} /></button>
+                  <button className="md:hidden" onClick={() => setSelected(null)} aria-label="Back"><ArrowLeft size={18} /></button>
                   <div><b>{thread.user.name || phoneLabel(thread.user.phone)}</b><div className="text-xs text-neutral-500">{phoneLabel(thread.user.phone)} · {thread.channel === 'WEB' ? 'Website chat' : 'WhatsApp'}</div></div>
                 </div>
                 {thread.mode === 'HUMAN'
-                  ? <button className="btn btn-light" style={{ padding: '9px 14px' }} onClick={() => setMode('AI')}><Bot size={14} /> Bot ko wapas dein</button>
-                  : <button className="btn btn-dark" style={{ padding: '9px 14px' }} onClick={() => setMode('HUMAN')}><UserCheck size={14} /> Main sambhalta hoon</button>}
+                  ? <button className="btn btn-light" style={{ padding: '9px 14px' }} onClick={() => setMode('AI')}><Bot size={14} /> Hand back to bot</button>
+                  : <button className="btn btn-dark" style={{ padding: '9px 14px' }} onClick={() => setMode('HUMAN')}><UserCheck size={14} /> I will handle this</button>}
               </div>
 
               <div className="flex-1 space-y-3 overflow-y-auto bg-[#f7f8f4] p-4" style={{ minHeight: 280 }}>
@@ -121,7 +121,7 @@ export default function SupportInbox() {
                   return (
                     <div key={m.id} className={`flex ${mine ? 'justify-end' : ''}`}>
                       <div className="max-w-[80%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6" style={{ background: admin ? '#173f2e' : mine ? '#e4e8e1' : '#fff', color: admin ? '#fff' : '#26332b', border: mine ? undefined : '1px solid #e5e9e3' }}>
-                        <div className="mb-1 text-[11px] font-bold opacity-60">{mine ? (admin ? 'Aap (team)' : 'Bot') : 'Customer'} · {time(m.createdAt)}</div>
+                        <div className="mb-1 text-[11px] font-bold opacity-60">{mine ? (admin ? 'You (team)' : 'Bot') : 'Customer'} · {time(m.createdAt)}</div>
                         {m.text}
                       </div>
                     </div>
@@ -131,10 +131,10 @@ export default function SupportInbox() {
               </div>
 
               <div className="border-t p-3">
-                {thread.channel === 'WHATSAPP' && <p className="mb-2 text-xs text-neutral-500">WhatsApp par reply sirf customer ke last message ke 24 ghante ke andar jaa sakta hai.</p>}
-                {thread.mode !== 'HUMAN' && <p className="mb-2 text-xs text-neutral-500">Reply bhejte hi chat aapke paas aa jaayegi (bot chup ho jaayega).</p>}
+                {thread.channel === 'WHATSAPP' && <p className="mb-2 text-xs text-neutral-500">WhatsApp only allows a reply within 24 hours of the customer's last message.</p>}
+                {thread.mode !== 'HUMAN' && <p className="mb-2 text-xs text-neutral-500">As soon as you send a reply the chat is yours and the bot stops answering.</p>}
                 <div className="flex gap-2">
-                  <textarea className="input" rows={2} value={text} onChange={(e) => setText(e.target.value)} placeholder="Customer ko reply likhein… (Enter = bhejein, Shift+Enter = nayi line)" style={{ resize: 'none' }}
+                  <textarea className="input" rows={2} value={text} onChange={(e) => setText(e.target.value)} placeholder="Write a reply… (Enter = send, Shift+Enter = new line)" style={{ resize: 'none' }}
                     onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
                   <button className="btn btn-dark" onClick={send} disabled={sending || !text.trim()} aria-label="Send"><Send size={16} /> {sending ? '…' : 'Send'}</button>
                 </div>

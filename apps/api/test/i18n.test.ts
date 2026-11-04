@@ -6,16 +6,16 @@ let n = 0; const ok = (name: string, fn: () => void) => { fn(); n++; console.log
 const keys = Object.keys(M) as (keyof typeof M)[];
 const placeholders = (s: string) => [...s.matchAll(/\{(\w+)\}/g)].map((x) => x[1]).sort().join(',');
 
-ok(`every one of ${keys.length} messages exists in all 5 languages and is non-empty`, () => {
+ok(`every one of ${keys.length} messages exists in all 4 languages and is non-empty`, () => {
   for (const k of keys) for (const l of LANGS) assert.ok(String(M[k][l]).trim().length > 0, `${k}.${l} is empty`);
 });
 ok('placeholders are identical across languages (a missing {url} would break a payment message)', () => {
   for (const k of keys) { const base = placeholders(M[k].en); for (const l of LANGS) assert.equal(placeholders(M[k][l]), base, `${k}.${l} placeholders differ`); }
 });
-ok('Hindi/Punjabi/Marathi use their own script (no accidental English copy)', () => {
-  const script: Record<string, RegExp> = { hi: /[\u0900-\u097f]/, mr: /[\u0900-\u097f]/, pa: /[\u0a00-\u0a7f]/ };
-  const allowSame = new Set(['lang_welcome_body', 'lang_button', 'ord_awb', 'm_status', 'price_ok']);
-  for (const k of keys) for (const l of ['hi', 'pa', 'mr'] as const) { if (allowSame.has(k as string)) continue; assert.match(M[k][l], script[l], `${k}.${l} has no ${l} script`); }
+ok('Hindi/Punjabi use their own script (no accidental English copy)', () => {
+  const script: Record<string, RegExp> = { hi: /[\u0900-\u097f]/, pa: /[\u0a00-\u0a7f]/ };
+  const allowSame = new Set(['lang_welcome_body', 'lang_button', 'ord_awb', 'm_status', 'price_ok', 'trust_upi_line']);
+  for (const k of keys) for (const l of ['hi', 'pa'] as const) { if (allowSame.has(k as string)) continue; assert.match(M[k][l], script[l], `${k}.${l} has no ${l} script`); }
 });
 ok('Hinglish is written in Roman letters', () => {
   for (const k of keys) { if (k === 'lang_welcome_body') continue; assert.doesNotMatch(M[k].hing, /[\u0900-\u097f\u0a00-\u0a7f]/, `${k}.hing contains native script`); }

@@ -11,6 +11,7 @@ import admin from './routes/admin';
 import webhooks from './routes/webhooks';
 import assistant from './routes/assistant';
 import media from './routes/media';
+import documents from './routes/documents';
 import { startPaymentSweeper } from './services/payments';
 
 const app = express();
@@ -80,6 +81,7 @@ app.get('/health', (_req, res) => {
 // API routes
 app.use('/api/auth', auth);
 app.use('/api/products', products);
+app.use('/api/documents', documents);
 app.use('/api/donations', donations);
 app.use('/api/orders', orders);
 app.use('/api/admin', admin);

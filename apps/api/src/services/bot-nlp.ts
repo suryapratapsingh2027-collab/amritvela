@@ -10,7 +10,8 @@ export function normalize(s: string): string {
 
 export function tokens(s: string): string[] {
   const n = normalize(s);
-  return n ? n.split(' ') : [];
+  // "x3" / "3x" are written together by many customers: split them into "x" + "3" so the quantity is found.
+  return n ? n.split(' ').flatMap((t) => { const a = t.match(/^x(\d{1,3})$/); if (a) return ['x', a[1]]; const b = t.match(/^(\d{1,3})x$/); if (b) return [b[1], 'x']; return [t]; }) : [];
 }
 
 const compact = (s: string) => normalize(s).replace(/\s+/g, '');
@@ -79,11 +80,24 @@ export function findProducts<T extends NamedProduct>(text: string, products: T[]
     }
     if (!found) continue;
     spans.set(p.id, found);
-    const after = toks.slice(found[1] + 1, found[1] + 3);
+  }
+
+  // A negation word ("nahi", "not", ...) belongs to the nearest product before it; it never skips over another product.
+  const allSpans = [...spans.values()];
+  for (const p of products) {
+    const found = spans.get(p.id);
+    if (!found) continue;
+    let isNegated = false;
+    for (let k = found[1] + 1; k <= found[1] + 2 && k < toks.length; k++) {
+      if (allSpans.some((sp) => sp[0] <= k && k <= sp[1] && sp !== found)) break; // another product starts first
+      if (allSpans.some((sp) => sp !== found && sp[0] > found[1] && sp[0] <= k)) break;
+      if (NEGATION.has(toks[k])) { isNegated = true; break; }
+    }
     const before = toks[found[0] - 1];
-    const isNegated = after.some((t) => NEGATION.has(t)) || (before !== undefined && PRE_NEGATION.has(before));
+    if (!isNegated && before !== undefined && PRE_NEGATION.has(before)) isNegated = true;
     (isNegated ? negated : wanted).push(p);
   }
+  wanted.sort((a, b) => spans.get(a.id)![0] - spans.get(b.id)![0]);
   // "Rudraksha Mala" also contains the word "Mala" (another product). The more specific, longer name wins.
   const inside = (small: [number, number], big: [number, number]) => big[0] <= small[0] && small[1] <= big[1] && (big[1] - big[0]) > (small[1] - small[0]);
   const dropContained = (list: T[]) => list.filter((p) => !list.some((q) => q.id !== p.id && inside(spans.get(p.id)!, spans.get(q.id)!)));
@@ -93,11 +107,11 @@ export function findProducts<T extends NamedProduct>(text: string, products: T[]
   return { wanted: wantedFinal, negated: negatedFinal, spans };
 }
 
-const NUMBER_WORDS: Record<string, number> = {
+export const NUMBER_WORDS: Record<string, number> = {
   ek: 1, one: 1, do: 2, two: 2, teen: 3, three: 3, char: 4, chaar: 4, four: 4, paanch: 5, panch: 5, five: 5,
   chhe: 6, che: 6, chhah: 6, six: 6, saat: 7, seven: 7, aath: 8, eight: 8, nau: 9, nine: 9, das: 10, ten: 10,
 };
-const UNIT_WORDS = new Set(['x', 'pcs', 'pc', 'piece', 'pieces', 'nos', 'no', 'qty', 'quantity', 'adad', 'packet', 'packets']);
+export const UNIT_WORDS = new Set(['x', 'pcs', 'pc', 'piece', 'pieces', 'nos', 'no', 'qty', 'quantity', 'adad', 'packet', 'packets']);
 
 /** Quantity written next to the product ("2 nariyal", "nariyal x3", "do mala"). Defaults to 1. */
 export function parseQuantity(text: string, span?: [number, number]): number {
@@ -216,3 +230,39 @@ export function validateName(text: string): { ok: true; name: string } | { ok: f
   if (!/[a-z\u0900-\u097f\u0a00-\u0a7f]/i.test(name)) return { ok: false };
   return { ok: true, name };
 }
+
+export type CartMention<T extends NamedProduct> = { product: T; qty: number | null };
+
+/**
+ * Parses an order like "2 nariyal 1 gangajal 3 mala" or "nariyal 2, gangajal 1".
+ * - qty is null when the customer named a product without a number
+ * - the number is taken from the same side (before / after the name) for every product, so a number sitting between
+ *   two products is never counted twice
+ * - products followed by "nahi" / preceded by "not" come back in `removed`
+ */
+export function parseCartItems<T extends NamedProduct>(text: string, products: T[]): { items: CartMention<T>[]; removed: T[] } {
+  const toks = tokens(text);
+  const { wanted, negated, spans } = findProducts(text, products);
+  const numAt = (idx: number): number | null => {
+    const t = toks[idx];
+    if (t === undefined) return null;
+    if (/^\d{1,3}$/.test(t)) { const n = Number(t); return n >= 1 && n <= 100 ? n : null; }
+    const w = NUMBER_WORDS[t];
+    return w ?? null;
+  };
+  const before = (span: [number, number]) => { let i = span[0] - 1; while (i >= 0 && UNIT_WORDS.has(toks[i])) i--; return numAt(i); };
+  const after = (span: [number, number]) => { let i = span[1] + 1; while (i < toks.length && UNIT_WORDS.has(toks[i])) i++; return /^\d+$/.test(toks[i] ?? '') ? numAt(i) : null; };
+
+  const first = wanted[0] ? spans.get(wanted[0].id)! : null;
+  const style: 'before' | 'after' = first && before(first) === null && after(first) !== null ? 'after' : 'before';
+  const items = wanted.map((product) => {
+    const span = spans.get(product.id)!;
+    return { product, qty: style === 'before' ? before(span) : after(span) };
+  });
+  return { items, removed: negated };
+}
+
+const DOCS = /(?:^|[^a-z])(pdf|pdfs|download|downloads|brochure|brochures|document|documents|catalogue pdf)(?:$|[^a-z])|डाउनलोड|ਡਾਊਨਲੋਡ|दस्तावेज|ਦਸਤਾਵੇਜ਼/i;
+export function hasDocsIntent(text: string): boolean { return DOCS.test(text); }
+const SOCIAL = /(?:^|[^a-z])(instagram|insta|facebook|fb|youtube|whatsapp\s*group|whatsapp\s*community|community|follow(?:\s*us)?)(?:$|[^a-z])|इंस्टाग्राम|फेसबुक|यूट्यूब|ਇੰਸਟਾਗ੍ਰਾਮ|ਫੇਸਬੁੱਕ|ਯੂਟਿਊਬ/i;
+export function hasSocialIntent(text: string): boolean { return SOCIAL.test(text); }

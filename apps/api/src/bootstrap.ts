@@ -19,6 +19,13 @@ async function bootstrap(){
     console.warn('[BOOTSTRAP] ADMIN_RESET_ON_BOOT=true: admin password reset from environment. Set it back to false.');
   }
   // Demo products are no longer re-created on every boot (they polluted the live catalogue and WhatsApp replies).
+  // A ready-to-fill draft for the second trust. It stays hidden from customers until the admin writes the information
+  // and (optionally) uploads the UPI QR code in Admin > Trusts, then switches it on.
+  if ((await db.trust.count()) === 0) {
+    await db.trust.create({ data: { slug: 'nanak-roti-trust', name: 'Nanak Roti Trust', active: false, sortOrder: 0, infoEn: '' } });
+    console.log('[BOOTSTRAP] Draft "Nanak Roti Trust" created (hidden until configured in the admin panel)');
+  }
+
   // Keep the verified Trust knowledge loaded in production. Hand-edited documents are never overwritten.
   const found = await db.knowledgeDocument.findFirst({ where: { title: TRUST_KNOWLEDGE_TITLE } });
   if (!found) {

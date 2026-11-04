@@ -223,3 +223,49 @@ model EventPoster {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
+
+// PDF files the admin uploads; the WhatsApp bot offers them in the "Downloads" list. Bytes live in the database so
+// delivery never depends on a third-party file host.
+model Document {
+  id String @id @default(cuid())
+  title String
+  description String?
+  fileName String
+  mimeType String @default("application/pdf")
+  size Int
+  data Bytes
+  active Boolean @default(true)
+  sortOrder Int @default(0)
+  downloads Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([active, sortOrder])
+}
+
+// Additional trusts (for example Nanak Roti Trust) managed from the admin panel. The WhatsApp bot shows the
+// information (in the customer's language when provided) and the UPI QR code donors can scan.
+model Trust {
+  id String @id @default(cuid())
+  slug String @unique
+  name String
+  active Boolean @default(true)
+  sortOrder Int @default(0)
+  infoEn String @default("")
+  infoHi String?
+  infoHing String?
+  infoPa String?
+  qrImageUrl String?
+  upiId String?
+  contactPhone String?
+  contactEmail String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Small key/value store for admin-managed settings (social links, ...).
+model Setting {
+  key String @id
+  value String
+  updatedAt DateTime @updatedAt
+}
