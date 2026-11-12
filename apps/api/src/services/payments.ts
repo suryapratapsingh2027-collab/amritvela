@@ -3,7 +3,8 @@ import { env } from '../config';
 import { normalizeLang, t } from '../i18n';
 import { fetchProviderPaymentState, type ProviderPaymentState } from '../integrations/razorpay';
 import { sendWhatsAppPdf, sendWhatsAppDocument, sendWhatsAppText } from '../integrations/whatsapp';
-import { makeReceipt } from './receipt';
+import { buildDonationReceipt } from './receipt-doc';
+import { ensureReceiptNumber } from './receipt-number';
 import { markOrderPaid } from './fulfillment';
 
 /* ------------------------------------------------------------------ donations */
@@ -16,6 +17,7 @@ export async function markDonationPaid(donationId: string, paymentId?: string | 
   });
   if (claim.count > 0) {
     console.log(`[PAYMENTS] Donation ${donationId} marked PAID (payment ${paymentId || 'n/a'})`);
+    await ensureReceiptNumber(donationId).catch((e) => console.error('[PAYMENTS] receipt number failed:', e?.message || e));
     await db.donation.update({ where: { id: donationId }, data: { receiptUrl: `${env.API_URL}/api/donations/${donationId}/receipt` } }).catch(() => undefined);
   }
   return claim.count > 0;
@@ -23,17 +25,12 @@ export async function markDonationPaid(donationId: string, paymentId?: string | 
 
 /** Generates and sends only the PDF (no intro text). Falls back to a link-based document, then throws. */
 export async function sendReceiptPdf(donationId: string): Promise<void> {
-  const d = await db.donation.findUnique({ where: { id: donationId }, include: { user: true } });
-  if (!d || d.paymentStatus !== 'PAID') throw new Error('Receipt is available only for PAID donations');
-  const pdf = await makeReceipt({
-    reference: d.reference, name: d.user.name, amount: d.amount, status: d.paymentStatus,
-    paymentId: d.razorpayPaymentId, paidAt: d.paidAt, phone: d.user.phone,
-  });
+  const { pdf, fileName, donation: d, receiptNumber } = await buildDonationReceipt(donationId);
   try {
-    await sendWhatsAppPdf(d.user.phone, pdf, `${d.reference}.pdf`, t(normalizeLang(d.user.language), 'receipt_caption', { ref: d.reference }));
+    await sendWhatsAppPdf(d.user.phone, pdf, fileName, t(normalizeLang(d.user.language), 'receipt_caption', { ref: receiptNumber || d.reference }));
   } catch (uploadError) {
     console.error('[RECEIPT] PDF upload failed, falling back to link delivery:', (uploadError as any)?.message || uploadError);
-    await sendWhatsAppDocument(d.user.phone, `${env.API_URL}/api/donations/${d.id}/receipt`, `${d.reference}.pdf`);
+    await sendWhatsAppDocument(d.user.phone, `${env.API_URL}/api/donations/${d.id}/receipt`, fileName);
   }
   await db.donation.update({ where: { id: d.id }, data: { receiptSentAt: new Date() } });
 }
@@ -49,7 +46,7 @@ export async function deliverDonationReceipt(donationId: string): Promise<boolea
   const claim = await db.donation.updateMany({ where: { id: d.id, receiptSentAt: null }, data: { receiptSentAt: new Date() } });
   if (claim.count === 0) return false;
   try {
-    await sendWhatsAppText(d.user.phone, t(normalizeLang(d.user.language), 'don_receipt_intro', { amount: d.amount.toLocaleString('en-IN'), ref: d.reference }));
+    await sendWhatsAppText(d.user.phone, t(normalizeLang(d.user.language), 'don_receipt_intro', { amount: d.amount.toLocaleString('en-IN'), ref: d.reference, receipt: (await ensureReceiptNumber(d.id)) || d.reference }));
     await sendReceiptPdf(d.id);
     return true;
   } catch (e: any) {

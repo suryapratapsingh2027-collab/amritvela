@@ -6,6 +6,7 @@
  */
 import { m, type L } from './helpers';
 import { M2 } from './messages-shop';
+import { M3 } from './messages-live';
 
 const M1 = {
   /* ---------------------------------------------------------------- language picker (shown before a language is known) */
@@ -35,12 +36,10 @@ const M1 = {
   m_info_d: m('Seva, Kirtan, Langar & more', 'सेवा, कीर्तन, लंगर और अधिक', 'Seva, Kirtan, Langar aur bahut kuch', 'ਸੇਵਾ, ਕੀਰਤਨ, ਲੰਗਰ ਤੇ ਹੋਰ'),
   m_donate: m('Donate', 'दान करें', 'Donation karein', 'ਦਾਨ ਕਰੋ'),
   m_donate_d: m('Secure link, receipt on WhatsApp', 'सुरक्षित लिंक, रसीद WhatsApp पर', 'Secure link, receipt WhatsApp par', 'ਸੁਰੱਖਿਅਤ ਲਿੰਕ, ਰਸੀਦ WhatsApp ਤੇ'),
-  m_contact: m('Contact us', 'संपर्क करें', 'Sampark karein', 'ਸੰਪਰਕ ਕਰੋ'),
+  m_contact: m('Contact & follow us', 'संपर्क और जुड़ें', 'Sampark aur judein', 'ਸੰਪਰਕ ਤੇ ਜੁੜੋ'),
   m_products: m('Our Products', 'हमारे उत्पाद', 'Hamare Products', 'ਸਾਡੇ ਉਤਪਾਦ'),
   m_products_d: m('See photos & order here', 'फोटो देखें और यहीं ऑर्डर करें', 'Photo dekhein aur yahin order karein', 'ਫੋਟੋ ਵੇਖੋ ਤੇ ਇੱਥੇ ਹੀ ਆਰਡਰ ਕਰੋ'),
-  m_status: m('Order / Payment status', 'ऑर्डर / भुगतान स्थिति', 'Order / Payment status', 'ਆਰਡਰ / ਭੁਗਤਾਨ ਸਥਿਤੀ'),
-  m_receipt: m('Donation receipt', 'दान की रसीद', 'Donation ki receipt', 'ਦਾਨ ਦੀ ਰਸੀਦ'),
-  m_social: m('Follow us', 'हमसे जुड़ें', 'Hamse judein', 'ਸਾਡੇ ਨਾਲ ਜੁੜੋ'),
+  m_status: m('Status & receipts', 'स्थिति और रसीद', 'Status aur receipt', 'ਸਥਿਤੀ ਤੇ ਰਸੀਦ'),
   m_human: m('Talk to our team', 'टीम से बात करें', 'Team se baat karein', 'ਟੀਮ ਨਾਲ ਗੱਲ ਕਰੋ'),
   m_lang: m('Change language', 'भाषा बदलें', 'Language badlein', 'ਭਾਸ਼ਾ ਬਦਲੋ'),
 
@@ -197,5 +196,5 @@ const M1 = {
   ),
 } as const satisfies Record<string, L>;
 
-export const M = { ...M1, ...M2 } as const;
+export const M = { ...M1, ...M2, ...M3 } as const;
 export type MessageKey = keyof typeof M;

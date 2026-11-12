@@ -33,6 +33,7 @@ let failLinkCreation = false;
 let failImage = false;
 let failInteractive = false;
 const WINDOW_CLOSED_PHONE = '919000000777';
+const FAIL_PHONE = '919000000888';
 let awbFail = false;
 const shipCalls: any[] = [];
 let assignCalls = 0;
@@ -46,11 +47,12 @@ const origLoad = (Module as any)._load;
   const real = origLoad.apply(this, arguments);
   if (resolved.endsWith('/integrations/whatsapp.ts')) {
     return { ...real,
-      sendWhatsAppText: async (to: string, text: string) => { if (to === WINDOW_CLOSED_PHONE) { const err: any = new Error('Request failed'); err.response = { data: { error: { code: 131047, message: 'Re-engagement message' } } }; throw err; } outbox.push({ to, kind: 'text', text }); return { ok: true }; },
-      sendWhatsAppPdf: async (to: string, pdf: Buffer, filename: string) => { assert.ok(pdf.slice(0, 4).toString() === '%PDF', 'receipt must be a real PDF'); outbox.push({ to, kind: 'pdf', filename, bytes: pdf.length }); return { ok: true }; },
+      sendWhatsAppText: async (to: string, text: string) => { if (to === FAIL_PHONE) throw new Error('boom'); if (to === WINDOW_CLOSED_PHONE) { const err: any = new Error('Request failed'); err.response = { data: { error: { code: 131047, message: 'Re-engagement message' } } }; throw err; } outbox.push({ to, kind: 'text', text }); return { ok: true }; },
+      sendWhatsAppPdf: async (to: string, pdf: Buffer, filename: string) => { if (to === WINDOW_CLOSED_PHONE) { const err: any = new Error('Request failed'); err.response = { data: { error: { code: 131047, message: 'Re-engagement message' } } }; throw err; } assert.ok(pdf.slice(0, 4).toString() === '%PDF', 'receipt must be a real PDF'); outbox.push({ to, kind: 'pdf', filename, bytes: pdf.length }); return { ok: true }; },
       sendWhatsAppInteractive: async (to: string, raw: any) => { if (failInteractive) throw new Error('interactive rejected'); const spec = real.sanitizeInteractive(raw); outbox.push({ to, kind: 'interactive', spec }); return { ok: true }; },
       sendWhatsAppImage: async (to: string, url: string, caption?: string) => { if (failImage) throw new Error('image rejected'); outbox.push({ to, kind: 'image', url, text: caption }); return { ok: true }; },
-      sendWhatsAppDocument: async (to: string, _l: string, filename: string) => { outbox.push({ to, kind: 'doc', filename }); return { ok: true }; },
+      sendWhatsAppTemplate: async (to: string, name: string, _l: string, params: string[]) => { if (to === FAIL_PHONE) throw new Error('template rejected'); outbox.push({ to, kind: 'template' as any, text: name + ' ' + params.join('|') }); return { ok: true }; },
+      sendWhatsAppDocument: async (to: string, _l: string, filename: string) => { if (to === WINDOW_CLOSED_PHONE) { const err: any = new Error('Request failed'); err.response = { data: { error: { code: 131047, message: 'Re-engagement message' } } }; throw err; } outbox.push({ to, kind: 'doc', filename }); return { ok: true }; },
     };
   }
   if (resolved.endsWith('/integrations/shiprocket.ts')) {
@@ -96,6 +98,7 @@ const assistantRouter = require('../src/routes/assistant').default;
 const productsRouter = require('../src/routes/products').default;
 const ordersRouter = require('../src/routes/orders').default;
 const donationsRouter = require('../src/routes/donations').default;
+const campaignsRouter = require('../src/routes/campaigns').default;
 const bcrypt = require('bcryptjs');
 const documentsRouter = require('../src/routes/documents').default;
 const payments = require('../src/services/payments');
@@ -106,7 +109,7 @@ const app = express();
 app.use(express.json({ verify: (req: any, _r, buf) => { req.rawBody = buf.toString(); } }));
 app.use('/webhooks', webhooks);
 app.use('/api/auth', authRouter); app.use('/api/admin', adminRouter); app.use('/api/assistant', assistantRouter);
-app.use('/api/products', productsRouter); app.use('/api/documents', documentsRouter); app.use('/api/orders', ordersRouter); app.use('/api/donations', donationsRouter);
+app.use('/api/products', productsRouter); app.use('/api/documents', documentsRouter); app.use('/api/orders', ordersRouter); app.use('/api/donations', donationsRouter); app.use('/api/campaigns', campaignsRouter);
 app.use((err: any, _req: any, res: any, _next: any) => res.status(err?.status || 500).json({ error: err?.message }));
 let base = '';
 
@@ -152,7 +155,7 @@ async function test(name: string, fn: () => Promise<void>) {
 }
 
 async function reset() {
-  for (const t of ['Message', 'SupportTicket', 'Conversation', 'OrderItem', 'Order', 'Donation', 'WebhookEvent', 'KnowledgeDocument', 'Document', 'Trust', 'Setting', 'Product', 'User']) await db.$executeRawUnsafe(`DELETE FROM "${t}"`);
+  for (const t of ['Message', 'SupportTicket', 'Conversation', 'OrderItem', 'Order', 'Donation', 'WebhookEvent', 'KnowledgeDocument', 'Document', 'Trust', 'Setting', 'Campaign', 'LiveSchedule', 'Broadcast', 'Counter', 'Product', 'User']) await db.$executeRawUnsafe(`DELETE FROM "${t}"`);
   outbox.length = 0; rzp.clear();
   await db.product.createMany({ data: [
     { name: 'Gangajal', slug: 'gangajal', description: 'Add product description', price: 400, stock: 5 },
@@ -249,7 +252,7 @@ async function reset() {
   await test('Razorpay says paid but NO webhook ever arrived: "Kardiya donation" reconciles live + sends PDF receipt', async () => {
     rzp.set(donationLink, { state: 'paid', amountPaidPaise: 90000, paymentId: 'pay_LIVE1' });
     const sent = await wa(PHONE, 'Kardiya donation');
-    assert.match(texts(sent), /verify ho gaya|verified/); assert.ok(sent.some((m) => m.kind === 'pdf' && /^DON-/.test(m.filename!)), 'PDF receipt must be sent');
+    assert.match(texts(sent), /verify ho gaya|verified/); assert.ok(sent.some((m) => m.kind === 'pdf' && /^AVT-\d{4}-\d{2}-\d{6}\.pdf$/.test(m.filename!)), 'PDF receipt must be sent');
     const d = await db.donation.findFirstOrThrow(); assert.equal(d.paymentStatus, 'PAID'); assert.equal(d.razorpayPaymentId, 'pay_LIVE1'); assert.ok(d.paidAt);
   });
   await test('"Kar diya donation meri receipt?" later -> PDF again (never the product list)', async () => {
@@ -290,7 +293,7 @@ async function reset() {
     rzp.set(d.razorpayOrderId!, { state: 'paid', amountPaidPaise: 30000, paymentId: 'pay_W2' });
     const [a, b] = await Promise.all([razorpayEvent(link), razorpayEvent(cap)]);
     await new Promise((r) => setTimeout(r, 300));
-    const pdfs = outbox.filter((m) => m.kind === 'pdf' && m.filename === d.reference + '.pdf').length;
+    const rnm = (await db.donation.findUniqueOrThrow({ where: { id: d.id } })).receiptNumber!.replace(/\//g, '-') + '.pdf'; const pdfs = outbox.filter((m) => m.kind === 'pdf' && m.filename === rnm).length; // (await db.donation.findUniqueOrThrow({ where: { id: d.id } })).receiptNumber!.replace(/\//g, '-') + '.pdf').length;
     assert.equal(a.status, 200); assert.equal(b.status, 200); assert.equal(pdfs, 1, `expected 1 receipt, got ${pdfs}`);
   });
   await test('REGRESSION: payment.captured / payment.failed with NO order_id must not touch unrelated pending records', async () => {
@@ -667,7 +670,7 @@ async function reset() {
     const sent = await tap(NEWBIE, 'lang:pa', 'ਪੰਜਾਬੀ (Punjabi)'); const m = lastInteractive(sent)!;
     assert.equal((await db.user.findUniqueOrThrow({ where: { phone: NEWBIE } })).language, 'pa');
     assert.match(m.spec.body, /ਭਾਸ਼ਾ ਪੰਜਾਬੀ ਚੁਣ ਲਈ ਗਈ ਹੈ ✅/); assert.match(m.spec.body, /ਮੈਂ ਤੁਹਾਡੀ ਕੀ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ/);
-    assert.deepEqual(rowIds(m), ['menu:info', 'menu:donate', 'menu:contact', 'menu:products', 'menu:status', 'menu:receipt', 'menu:human', 'menu:lang']);
+    assert.deepEqual(rowIds(m), ['menu:info', 'menu:donate', 'menu:contact', 'menu:products', 'menu:status', 'menu:human', 'menu:lang']);
     assert.match(texts(sent), /ਟਰੱਸਟ ਬਾਰੇ ਜਾਣਕਾਰੀ/);
   });
   await test('a later "Hello" shows the main menu (not the language list again), still in Punjabi', async () => {
@@ -682,7 +685,7 @@ async function reset() {
     const m = lastInteractive(await tap(NEWBIE, 'menu:contact'))!; assert.match(m.spec.body, /ਸੈਕਸ਼ਨ 26, ਉਲਹਾਸਨਗਰ-4/); assert.match(m.spec.body, /6913001300/); assert.match(m.spec.body, /amritvelatrustlive@gmail.com/);
   });
   await test('social row: hidden unless links are configured', async () => {
-    const menu = lastInteractive(await tap(NEWBIE, 'menu:main'))!; assert.ok(!rowIds(menu).includes('menu:social'));
+    assert.doesNotMatch(texts(await tap(NEWBIE, 'menu:contact')), /instagram|facebook/i);
     assert.match(texts(await tap(NEWBIE, 'menu:social')), /ਸੋਸ਼ਲ ਮੀਡੀਆ ਲਿੰਕ/);
   });
   await test('Donate -> amount list; tap ₹501 -> asks the name (new customer) in Punjabi -> link with the Punjabi message', async () => {
@@ -956,23 +959,181 @@ async function reset() {
     assert.match((await put({ youtube: 'https://evil.example/yt' })).json.error, /YouTube/);
   });
   await test('no links -> no "Follow us" row; typed "instagram" says links are not available', async () => {
-    await wa(PHONE, 'hello'); await tap(PHONE, 'lang:en', 'English'); assert.ok(!rowIds(lastInteractive(await tap(PHONE, 'menu:main', 'Main menu'))).includes('menu:social'));
+    await wa(PHONE, 'hello'); await tap(PHONE, 'lang:en', 'English'); assert.doesNotMatch(texts(await tap(PHONE, 'menu:contact', 'Contact')), /instagram|facebook/i);
     assert.match(texts(await wa(PHONE, 'instagram')), /social media links are not available/);
   });
   await test('admin saves links -> row appears; customer receives all of them', async () => {
     const r = await http('PUT', '/api/admin/settings/social', { token: adminToken, body: { instagram: 'https://www.instagram.com/amritvelatrust/', facebook: 'https://www.facebook.com/amritvelatrust', whatsappGroup: 'https://chat.whatsapp.com/AbCdEf123456', youtube: '' } });
     assert.equal(r.status, 200); assert.equal(r.json.instagram, 'https://www.instagram.com/amritvelatrust/'); assert.equal(r.json.youtube, undefined);
     assert.deepEqual((await http('GET', '/api/admin/settings/social', { token: adminToken })).json, r.json);
-    assert.ok(rowIds(lastInteractive(await tap(PHONE, 'menu:main', 'Main menu'))!).includes('menu:social'));
-    const t1 = texts(await tap(PHONE, 'menu:social', 'Follow us')); assert.match(t1, /📸 Instagram: https:\/\/www\.instagram\.com\/amritvelatrust\//); assert.match(t1, /📘 Facebook: https:\/\/www\.facebook\.com\/amritvelatrust/); assert.match(t1, /💬 WhatsApp: https:\/\/chat\.whatsapp\.com\/AbCdEf123456/); assert.doesNotMatch(t1, /YouTube/);
+    assert.ok(rowIds(lastInteractive(await tap(PHONE, 'menu:main', 'Main menu'))!).includes('menu:contact'));
+    const t1 = texts(await tap(PHONE, 'menu:contact', 'Contact')); assert.match(t1, /📸 Instagram: https:\/\/www\.instagram\.com\/amritvelatrust\//); assert.match(t1, /📘 Facebook: https:\/\/www\.facebook\.com\/amritvelatrust/); assert.match(t1, /💬 WhatsApp: https:\/\/chat\.whatsapp\.com\/AbCdEf123456/); assert.doesNotMatch(t1, /YouTube/);
     assert.match(texts(await wa(PHONE, 'facebook page link')), /📘 Facebook/);
   });
   await test('links are shown in the customer language heading; editing one keeps the others; clearing removes the row again', async () => {
-    const hi = '919811100030'; await wa(hi, 'hello'); await tap(hi, 'lang:hi', 'हिन्दी (Hindi)'); assert.match(texts(await tap(hi, 'menu:social', 'x')), /\*हमसे जुड़ें\*/);
+    const hi = '919811100030'; await wa(hi, 'hello'); await tap(hi, 'lang:hi', 'हिन्दी (Hindi)'); assert.match(texts(await tap(hi, 'menu:contact', 'x')), /\*हमसे जुड़ें\*/);
     await http('PUT', '/api/admin/settings/social', { token: adminToken, body: { instagram: 'https://instagram.com/new_handle' } });
     const now = (await http('GET', '/api/admin/settings/social', { token: adminToken })).json; assert.equal(now.instagram, 'https://instagram.com/new_handle'); assert.ok(now.facebook && now.whatsappGroup);
     await http('PUT', '/api/admin/settings/social', { token: adminToken, body: { instagram: '', facebook: '', whatsappGroup: '' } });
-    assert.ok(!rowIds(lastInteractive(await tap(PHONE, 'menu:main', 'Main menu'))!).includes('menu:social'));
+    assert.doesNotMatch(texts(await tap(PHONE, 'menu:contact', 'Contact')), /instagram|facebook/i);
+  });
+
+  console.log('\nROUND 6 — RECEIPTS, DASHBOARD, DONORS, CAMPAIGNS, LIVE KIRTAN');
+  await reset();
+  const { env: liveEnv } = require('../src/config');
+  const liveSvc = require('../src/services/live');
+  const { istParts } = require('../src/services/time');
+  const adm = (m: string, p: string, body?: any) => http(m, `/api/admin${p}`, { token: adminToken, body });
+  const mkPaid = async (phone: string, amount: number, extra: any = {}) => {
+    await db.user.upsert({ where: { phone }, update: {}, create: { phone, name: 'Donor ' + phone.slice(-4) } });
+    const u = await db.user.findUniqueOrThrow({ where: { phone } });
+    const d = await db.donation.create({ data: { userId: u.id, amount, reference: `DON-T-${Math.random().toString(36).slice(2, 8)}`, paymentStatus: 'PENDING', razorpayOrderId: `plink_x${++linkSeq}`, ...extra } });
+    await payments.markDonationPaid(d.id, 'pay_t' + linkSeq);
+    return db.donation.findUniqueOrThrow({ where: { id: d.id } });
+  };
+
+  await test('PAID donation gets a unique receipt number AVT/<FY>/<6 digits>; numbers never repeat', async () => {
+    const a = await mkPaid('919811000001', 500), b = await mkPaid('919811000002', 700);
+    assert.match(a.receiptNumber!, /^AVT\/\d{4}-\d{2}\/\d{6}$/); assert.notEqual(a.receiptNumber, b.receiptNumber);
+    const res = await fetch(`${base}/api/admin/donations/${a.id}/receipt`, { headers: { Authorization: `Bearer ${adminToken}` } });
+    assert.equal(res.status, 200); assert.match(res.headers.get('content-type')!, /pdf/); assert.match(res.headers.get('content-disposition')!, /AVT-\d{4}-\d{2}-\d{6}\.pdf/);
+    assert.equal(Buffer.from(await res.arrayBuffer()).slice(0, 4).toString(), '%PDF');
+  });
+  await test('receipt: unpaid -> 409, unknown -> 404, no admin token -> 401', async () => {
+    const u = await db.user.findUniqueOrThrow({ where: { phone: '919811000001' } });
+    const p = await db.donation.create({ data: { userId: u.id, amount: 100, reference: 'DON-PEND-1', paymentStatus: 'PENDING' } });
+    assert.equal((await adm('GET', `/donations/${p.id}/receipt`)).status, 409); assert.equal((await adm('GET', '/donations/nope/receipt')).status, 404);
+    assert.equal((await http('GET', `/api/admin/donations/${p.id}/receipt`)).status, 401);
+  });
+  await test('admin "resend receipt" -> PDF on WhatsApp; closed 24h window -> clear 409 message', async () => {
+    const d = await db.donation.findFirstOrThrow({ where: { paymentStatus: 'PAID' } });
+    const from = outbox.length; const r = await adm('POST', `/donations/${d.id}/resend-receipt`); assert.equal(r.status, 200);
+    assert.ok(outbox.slice(from).some((m) => m.kind === 'pdf'));
+    const closed = await mkPaid(WINDOW_CLOSED_PHONE, 300); const r2 = await adm('POST', `/donations/${closed.id}/resend-receipt`);
+    assert.equal(r2.status, 409); assert.match(r2.json.error, /24 hours/);
+  });
+
+  await test('dashboard: totals, 30/12 series, recent donations, only PAID counted', async () => {
+    const r = await adm('GET', '/reports/dashboard'); assert.equal(r.status, 200); const x = r.json;
+    assert.equal(x.totals.allTime.total, 500 + 700 + 300); assert.equal(x.totals.allTime.count, 3);
+    assert.equal(x.daily.length, 30); assert.equal(x.monthly.length, 12); assert.ok(Array.isArray(x.yearly)); assert.ok(x.recent.length >= 3);
+    assert.equal(x.totals.pending.count, 1); assert.equal(x.totals.today.total, 1500 - 300 + 300);
+    assert.equal(x.daily[x.daily.length - 1].total, 1500);
+  });
+  await test('CSV report: header + rows, formula injection neutralised, bad dates rejected', async () => {
+    const u = await db.user.findUniqueOrThrow({ where: { phone: '919811000001' } }); await db.user.update({ where: { id: u.id }, data: { name: '=HYPERLINK("http://x")' } });
+    const res = await fetch(`${base}/api/admin/reports/donations.csv`, { headers: { Authorization: `Bearer ${adminToken}` } });
+    const csv = await res.text(); assert.equal(res.status, 200); assert.match(res.headers.get('content-type')!, /csv/);
+    assert.ok(csv.includes("'=HYPERLINK") && !/(^|,)"?=HYPERLINK/m.test(csv)); assert.equal(res.headers.get('x-report-paid-total'), '1500');
+    assert.equal((await adm('GET', '/reports/donations.csv?from=2026-13-45')).status, 400);
+  });
+
+  await test('donors: list/search/sort, profile with history + totals, edit notes, validation', async () => {
+    const l = await adm('GET', '/donors?sort=total'); assert.equal(l.status, 200); assert.ok(l.json.donors.length >= 3); assert.equal(l.json.donors[0].totalDonated, 700);
+    assert.equal((await adm('GET', '/donors?search=0002')).json.donors.length >= 1, true);
+    assert.equal((await adm('GET', "/donors?search=%25%27%22")).status, 200);
+    const id = l.json.donors[0].id; const p = await adm('GET', `/donors/${id}`); assert.equal(p.status, 200); assert.equal(p.json.donations.length, 1);
+    assert.equal((await adm('PATCH', `/donors/${id}`, { notes: 'Regular sevadar', email: 'bad' })).status, 400);
+    const ok = await adm('PATCH', `/donors/${id}`, { notes: 'Regular sevadar', email: 'a@b.com' }); assert.equal(ok.status, 200); assert.equal(ok.json.notes, 'Regular sevadar');
+    assert.equal((await adm('GET', '/donors/nope')).status, 404);
+  });
+
+  let camp: any;
+  await test('campaign create: validation messages, slug, defaults; end before start rejected', async () => {
+    assert.equal((await adm('POST', '/campaigns', { title: 'ab', targetAmount: 5000 })).status, 400);
+    assert.match((await adm('POST', '/campaigns', { title: 'Langar Seva', targetAmount: 50 })).json.error, /at least ₹100/);
+    assert.match((await adm('POST', '/campaigns', { title: 'Langar Seva', targetAmount: 5000, startsAt: '2026-12-10', endsAt: '2026-12-01' })).json.error, /end date/);
+    const c = await adm('POST', '/campaigns', { title: 'Langar Seva', targetAmount: 1000, descriptionEn: 'Daily langar', descriptionHi: 'रोज़ लंगर' }); assert.equal(c.status, 201);
+    camp = c.json; assert.equal(camp.slug, 'langar-seva'); assert.equal(camp.percent, 0); assert.equal(camp.status, 'ACTIVE');
+    assert.equal((await adm('POST', '/campaigns', { title: 'Langar Seva', targetAmount: 1000 })).json.slug, 'langar-seva-2');
+  });
+  await test('public campaign API lists only live campaigns with progress', async () => {
+    const pub = await fetch(`${base}/api/campaigns`); assert.equal(pub.status, 200); const j: any = await pub.json(); const list = j.campaigns ?? j;
+    assert.ok(list.some((c: any) => c.slug === 'langar-seva')); assert.equal((await fetch(`${base}/api/campaigns/langar-seva`)).status, 200); assert.equal((await fetch(`${base}/api/campaigns/zzz`)).status, 404);
+  });
+  await test('bot: Donate shows the campaign; tapping it -> amounts -> payment link carrying the campaign', async () => {
+    const ph = '919811000050'; await wa(ph, 'hello'); await tap(ph, 'lang:en', 'English');
+    const menu = lastInteractive(await tap(ph, 'menu:donate', 'Donate'))!; assert.ok(rowIds(menu).includes(`camp:${camp.slug}`), JSON.stringify(rowIds(menu)));
+    const amounts = await tap(ph, `camp:${camp.slug}`, 'Langar Seva'); assert.match(texts(amounts), /Langar Seva/);
+    await wa(ph, 'Ramesh Kumar').catch(() => undefined);
+    const link = texts(await tap(ph, `camp:${camp.slug}:501`, '₹501')) + texts(await wa(ph, 'Ramesh Kumar'));
+    assert.match(link, /rzp\.io\/rzp\/plink_/);
+    const d = await db.donation.findFirstOrThrow({ where: { campaignId: camp.id } }); assert.equal(d.amount, 501); assert.equal(d.paymentStatus, 'PENDING');
+  });
+  await test('campaign donation PAID -> progress bar + collected amount grow; pending ones do not count', async () => {
+    let c = (await adm('GET', '/campaigns')).json.find((x: any) => x.id === camp.id); assert.equal(c.raised, 0);
+    const d = await db.donation.findFirstOrThrow({ where: { campaignId: camp.id } }); await payments.markDonationPaid(d.id, 'pay_c1');
+    c = (await adm('GET', '/campaigns')).json.find((x: any) => x.id === camp.id); assert.equal(c.raised, 501); assert.equal(c.percent, 50); assert.equal(c.donations, 1);
+    await mkPaid('919811000051', 900, { campaignId: camp.id }); c = (await adm('GET', '/campaigns')).json.find((x: any) => x.id === camp.id);
+    assert.equal(c.percent, 100); assert.equal(c.goalReached, true);
+  });
+  await test('campaign with donations cannot be deleted; paused campaign refuses new donations and leaves the bot menu', async () => {
+    assert.equal((await adm('DELETE', `/campaigns/${camp.id}`)).status, 409);
+    assert.equal((await adm('PATCH', `/campaigns/${camp.id}`, { status: 'PAUSED' })).status, 200);
+    const ph = '919811000050'; const menu = lastInteractive(await tap(ph, 'menu:donate', 'Donate'))!; assert.ok(!rowIds(menu).includes(`camp:${camp.slug}`));
+    const t1 = texts(await tap(ph, `camp:${camp.slug}:501`, '₹501')); assert.doesNotMatch(t1, /rzp\.io/);
+    const fresh = await adm('POST', '/campaigns', { title: 'Empty One', targetAmount: 2000 }); assert.equal((await adm('DELETE', `/campaigns/${fresh.json.id}`)).status, 204);
+  });
+
+  await test('live settings validation: only real YouTube links, title/hours limits', async () => {
+    assert.equal((await adm('PUT', '/live/settings', { url: 'https://evil.example.com/watch?v=abc' })).status, 400);
+    assert.equal((await adm('PUT', '/live/settings', { url: 'http://youtube.com/live/abc' })).status, 400);
+    assert.equal((await adm('PUT', '/live/settings', { title: 'x' })).status, 400); assert.equal((await adm('PUT', '/live/settings', { windowHours: 99 })).status, 400);
+    const ok = await adm('PUT', '/live/settings', { url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', title: 'Subah ka Kirtan', enabled: true, windowHours: 3 }); assert.equal(ok.status, 200); assert.equal(ok.json.title, 'Subah ka Kirtan');
+  });
+  await test('schedules: add 9:00 daily + a one-off night slot; invalid times/days/dates rejected; edit/pause/delete', async () => {
+    assert.equal((await adm('POST', '/live/schedules', { label: 'x', time: '25:00', days: [0, 1] })).status, 400);
+    assert.equal((await adm('POST', '/live/schedules', { label: 'x', time: '09:00', days: [] })).status, 400);
+    assert.equal((await adm('POST', '/live/schedules', { label: 'x', time: '09:00', onceDate: '2020-01-01' })).status, 400);
+    const a = await adm('POST', '/live/schedules', { label: 'Subah 9 baje', time: '09:00', days: [0, 1, 2, 3, 4, 5, 6] }); assert.equal(a.status, 201); assert.match(a.json.summary, /9:00/);
+    const u = await adm('PATCH', `/live/schedules/${a.json.id}`, { time: '12:00' }); assert.equal(u.status, 200); assert.equal(u.json.time, '12:00');
+    assert.equal((await adm('PATCH', `/live/schedules/${a.json.id}`, { active: false })).json.active, false);
+    assert.equal((await adm('DELETE', `/live/schedules/${a.json.id}`)).status, 204); assert.equal((await adm('PATCH', '/live/schedules/nope', { active: true })).status, 404);
+  });
+  await test('broadcast: in-window customers get the link as text; outside window skipped (no template); failures counted; opted-out excluded', async () => {
+    await db.$executeRawUnsafe('DELETE FROM "Broadcast"');
+    const mkChat = async (phone: string, hoursAgo: number, extra: any = {}) => {
+      const u = await db.user.upsert({ where: { phone }, update: extra, create: { phone, name: 'L' + phone.slice(-3), ...extra } });
+      const c = await db.conversation.create({ data: { userId: u.id, channel: 'WHATSAPP' } });
+      await db.message.create({ data: { conversationId: c.id, direction: 'IN', text: 'hello', createdAt: new Date(Date.now() - hoursAgo * 3600_000) } }); return u;
+    };
+    await db.$executeRawUnsafe('DELETE FROM "Message"'); await db.$executeRawUnsafe('DELETE FROM "SupportTicket"'); await db.$executeRawUnsafe('DELETE FROM "Conversation"');
+    await mkChat('919822000001', 1); await mkChat('919822000002', 30); await mkChat('919822000003', 2, { liveAlerts: false }); await mkChat(FAIL_PHONE, 1);
+    const a = await adm('GET', '/live'); assert.equal(a.json.audience.subscribers, 3); assert.equal(a.json.audience.withinWindow, 2); assert.equal(a.json.audience.optedOut, 1);
+    const from = outbox.length; const b = await liveSvc.startBroadcast({ trigger: 'MANUAL', title: 'Subah ka Kirtan', url: 'https://youtu.be/abc12345', wait: true });
+    const sent = outbox.slice(from).filter((m) => m.kind === 'text'); assert.equal(sent.length, 1); assert.equal(sent[0].to, '919822000001'); assert.match(sent[0].text!, /youtu\.be\/abc12345/);
+    const row = await db.broadcast.findUniqueOrThrow({ where: { id: b.id } }); assert.equal(row.status, 'DONE'); assert.equal(row.sent, 1); assert.equal(row.skipped, 1); assert.equal(row.failed, 1);
+  });
+  await test('with an approved template configured, customers outside the 24h window receive it', async () => {
+    liveEnv.WHATSAPP_LIVE_TEMPLATE_NAME = 'live_kirtan_alert'; const from = outbox.length;
+    await liveSvc.startBroadcast({ trigger: 'MANUAL', title: 'Kirtan', url: 'https://youtu.be/abc12345', wait: true });
+    const tpl = outbox.slice(from).filter((m: any) => m.kind === 'template'); assert.equal(tpl.length, 1, 'only the outside-window customer needs the template'); assert.ok(tpl.some((m: any) => m.to === '919822000002'));
+    liveEnv.WHATSAPP_LIVE_TEMPLATE_NAME = '';
+  });
+  await test('scheduler fires a due slot once per day (no double send), not before its time, not when disabled', async () => {
+    await db.$executeRawUnsafe('DELETE FROM "LiveSchedule"'); const now = new Date(); const hm = istParts(now).hm;
+    const early = new Date(now.getTime() - 3600_000).toISOString(); void early;
+    const far = `${String((Number(hm.slice(0, 2)) + 5) % 24).padStart(2, '0')}:${hm.slice(3)}`;
+    await adm('POST', '/live/schedules', { label: 'Door', time: far, days: [0, 1, 2, 3, 4, 5, 6] });
+    assert.equal(await liveSvc.runDueSchedules(now, true), 0, 'slot in the future must not fire');
+    await adm('POST', '/live/schedules', { label: 'Abhi', time: hm, days: [0, 1, 2, 3, 4, 5, 6] });
+    const before = await db.broadcast.count(); assert.equal(await liveSvc.runDueSchedules(now, true), 1); assert.equal(await liveSvc.runDueSchedules(now, true), 0, 'same minute again must not re-fire');
+    assert.equal(await db.broadcast.count(), before + 1);
+    await adm('PUT', '/live/settings', { enabled: false }); await db.liveSchedule.updateMany({ data: { lastFiredKey: null } }); assert.equal(await liveSvc.runDueSchedules(now, true), 0); await adm('PUT', '/live/settings', { enabled: true });
+  });
+  await test('STOP / SUBSCRIBE: customer opts out of live alerts and back in; bot shows Live Kirtan row + intent', async () => {
+    const ph = '919822000001'; assert.match(texts(await wa(ph, 'STOP')), /alert|Alert/); assert.equal((await db.user.findUniqueOrThrow({ where: { phone: ph } })).liveAlerts, false);
+    await wa(ph, 'SUBSCRIBE'); assert.equal((await db.user.findUniqueOrThrow({ where: { phone: ph } })).liveAlerts, true);
+    await wa(ph, 'hello'); await tap(ph, 'lang:en', 'English'); const menu = lastInteractive(await tap(ph, 'menu:main', 'Main menu'))!; assert.ok(rowIds(menu).includes('menu:live'));
+    assert.match(texts(await wa(ph, 'live kirtan kab hota hai')), /youtube\.com|youtu\.be/);
+  });
+  await test('admin "Go live now" + test message + end live; HTTP validation', async () => {
+    const r = await adm('POST', '/live/broadcast', { title: 'Special Kirtan' }); assert.equal(r.status, 202);
+    await new Promise((x) => setTimeout(x, 400)); assert.equal((await adm('GET', '/live')).json.settings.isLiveNow, true);
+    assert.equal((await adm('POST', '/live/end')).json.isLiveNow, false);
+    assert.equal((await adm('POST', '/live/test', { phone: '123' })).status, 400);
+    assert.equal((await adm('POST', '/live/test', { phone: '9822000001' })).status, 200);
+    assert.equal((await http('POST', '/api/admin/live/broadcast')).status, 401);
   });
 
   console.log('\nBOOTSTRAP KNOWLEDGE LOADER');

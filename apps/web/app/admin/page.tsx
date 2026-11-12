@@ -4,8 +4,9 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { LucideIcon } from 'lucide-react';
 import {
-  LayoutDashboard, Package, HeartHandshake, Users, MessageCircle, BookOpen, LogOut, Truck, Images, CalendarDays, UserCog, Landmark, FileText, Share2,
+  LayoutDashboard, Package, HeartHandshake, Users, MessageCircle, BookOpen, LogOut, Truck, Images, CalendarDays, UserCog, Landmark, FileText, Share2, Megaphone, Radio, Contact,
 } from 'lucide-react';
+import './admin.css';
 import { api, ApiError } from '../../lib/api';
 import ProductsAdmin from './ProductsAdmin';
 import SupportInbox from './SupportInbox';
@@ -13,15 +14,23 @@ import AccountSettings from './AccountSettings';
 import DocumentsAdmin from './DocumentsAdmin';
 import TrustsAdmin from './TrustsAdmin';
 import SocialAdmin from './SocialAdmin';
+import DashboardAdmin from './DashboardAdmin';
+import DonationsAdmin from './DonationsAdmin';
+import DonorsAdmin from './DonorsAdmin';
+import CampaignsAdmin from './CampaignsAdmin';
+import LiveAdmin from './LiveAdmin';
 import { GalleryAdmin, KnowledgeAdmin, PosterAdmin } from './ContentAdmin';
 
 type NavItem = [key: string, label: string, Icon: LucideIcon];
 
-const nav: NavItem[] = [
-  ['overview', 'Overview', LayoutDashboard], ['products', 'Products', Package], ['orders', 'Orders', Truck], ['donations', 'Donations', HeartHandshake],
-  ['customers', 'Customers', Users], ['conversations', 'Support', MessageCircle], ['trusts', 'Trusts', Landmark], ['documents', 'Documents (PDF)', FileText],
-  ['social', 'Social Links', Share2], ['knowledge', 'AI Knowledge', BookOpen], ['gallery', 'Gallery', Images], ['posters', 'Event Posters', CalendarDays], ['account', 'Account', UserCog],
+const groups: { title: string; items: NavItem[] }[] = [
+  { title: 'Overview', items: [['overview', 'Dashboard', LayoutDashboard]] },
+  { title: 'Donations', items: [['donations', 'Donations', HeartHandshake], ['donors', 'Donors', Contact], ['campaigns', 'Campaigns', Megaphone], ['live', 'Live Kirtan', Radio]] },
+  { title: 'Shop', items: [['products', 'Products', Package], ['orders', 'Orders', Truck], ['customers', 'Customers', Users]] },
+  { title: 'WhatsApp & content', items: [['conversations', 'Support', MessageCircle], ['trusts', 'Trusts', Landmark], ['documents', 'Documents (PDF)', FileText], ['social', 'Social Links', Share2], ['knowledge', 'AI Knowledge', BookOpen], ['gallery', 'Gallery', Images], ['posters', 'Event Posters', CalendarDays]] },
+  { title: 'Settings', items: [['account', 'Account', UserCog]] },
 ];
+const nav: NavItem[] = groups.flatMap((g) => g.items);
 
 export default function Admin() {
   const router = useRouter();
@@ -61,55 +70,45 @@ export default function Admin() {
     finally { setShipping(''); }
   }
 
-  if (loading) return <main className="grid min-h-screen place-items-center">Loading admin…</main>;
+  if (loading) return <main className="adm grid min-h-screen place-items-center">Loading admin…</main>;
 
+  const pending = stats?.pendingPayments || 0;
   return (
-    <main className="min-h-screen bg-[#f5f5f2]">
-      <aside className="fixed hidden h-screen w-64 overflow-y-auto border-r bg-white p-5 pb-20 lg:block">
-        <div className="px-3 py-4 font-extrabold">AMRIT VELA <span className="text-neutral-400">TRUST</span></div>
-        <div className="mt-5 space-y-1">
-          {nav.map(([key, label, Icon]) => (
-            <button key={key} onClick={() => setTab(key)} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-semibold ${tab === key ? 'bg-black text-white' : 'hover:bg-neutral-100'}`}><Icon size={17} />{label}</button>
-          ))}
-        </div>
-        <button onClick={() => { localStorage.removeItem('trust_token'); router.push('/login'); }} className="fixed bottom-5 left-5 flex items-center gap-3 px-3 text-sm text-neutral-500"><LogOut size={17} /> Sign out</button>
-      </aside>
-
-      <section className="lg:ml-64">
-        <header className="sticky top-0 z-10 border-b bg-[#f5f5f2]/90 px-5 py-4 backdrop-blur md:px-8">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-xs font-bold uppercase tracking-widest text-neutral-400">Trust Admin Console</div>
-              <h1 className="mt-1 text-2xl font-extrabold">{nav.find((n) => n[0] === tab)?.[1]}</h1>
-            </div>
-            <span className="rounded-full bg-black px-4 py-2 text-xs font-bold text-white">{stats?.pendingPayments || 0} pending payments</span>
-          </div>
-          {/* phones and tablets: the sidebar is hidden, so show the menu as a dropdown */}
-          <select className="input mt-3 lg:hidden" aria-label="Section" value={tab} onChange={(e) => setTab(e.target.value)}>{nav.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select>
-        </header>
-
-        <div className="p-5 md:p-8">
-          {loadError && <div role="alert" className="mb-5 rounded-2xl bg-red-50 p-4 text-sm text-red-700">{loadError} <button className="font-bold underline" onClick={() => { setLoadError(''); load(); }}>Try again</button></div>}
-
-          {tab === 'overview' && <>
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-              {[['Orders', stats?.orders ?? 0], ['Donations', stats?.donations ?? 0], ['Customers', stats?.customers ?? 0], ['Revenue', `₹${stats?.revenue ?? 0}`], ['Donated', `₹${stats?.donationTotal ?? 0}`]].map(([t, v]: any) => (
-                <div key={t} className="rounded-3xl border bg-white p-6"><div className="mt-3 text-3xl font-extrabold">{v}</div><div className="mt-1 text-sm text-neutral-500">{t}</div></div>
+    <main className="adm">
+      <aside className="adm-side" aria-label="Admin navigation">
+        <div className="adm-brand"><div className="adm-logo" aria-hidden>अ</div><div><b>AMRIT VELA</b><small>TRUST</small></div></div>
+        <nav className="adm-nav">
+          {groups.map((g) => (
+            <div key={g.title}>
+              <div className="adm-group">{g.title}</div>
+              {g.items.map(([key, label, Icon]) => (
+                <button key={key} className="adm-link" aria-current={tab === key ? 'page' : undefined} onClick={() => setTab(key)}>
+                  <Icon size={17} />{label}{key === 'donations' && pending > 0 && <span className="count">{pending}</span>}
+                </button>
               ))}
             </div>
-            <div className="mt-6 grid gap-4 md:grid-cols-2">
-              <div className="rounded-3xl border bg-white p-6">
-                <h2 className="font-bold">What you can manage here</h2>
-                <div className="mt-5 space-y-3">
-                  {['Products, stock and photos (website + WhatsApp)', 'Orders, shipments and donations', 'Support chats (WhatsApp and website)', 'Other trusts with donation QR codes', 'PDF documents for customers to download on WhatsApp', 'Instagram, Facebook and WhatsApp group links', 'AI knowledge, gallery and event posters'].map((x) => <div className="rounded-xl bg-neutral-100 p-3 text-sm font-semibold" key={x}>{x}</div>)}
-                </div>
-              </div>
-              <div className="rounded-3xl border bg-white p-6">
-                <h2 className="font-bold">Production checklist</h2>
-                <p className="mt-3 text-sm leading-6 text-neutral-500">Set real provider credentials, set MOCK_PROVIDERS=false, deploy the API and the web app, and configure the Meta, Razorpay and Shiprocket webhooks. Check <code>/health</code> on the API to see which settings are missing.</p>
-              </div>
+          ))}
+        </nav>
+        <div className="adm-foot"><button className="adm-link" onClick={() => { localStorage.removeItem('trust_token'); router.push('/login'); }}><LogOut size={17} /> Sign out</button></div>
+      </aside>
+
+      <section className="adm-main">
+        <header className="adm-top">
+          <div className="adm-top-row">
+            <div>
+              <div className="adm-eyebrow">Trust Admin Console</div>
+              <h1 className="adm-title">{nav.find((n) => n[0] === tab)?.[1]}</h1>
             </div>
-          </>}
+            <span className={`adm-badge ${pending ? 'warn' : 'ok'}`}>{pending} pending payment{pending === 1 ? '' : 's'}</span>
+          </div>
+          {/* phones and tablets: the sidebar is hidden, so show the menu as a dropdown */}
+          <select className="adm-in lg:hidden" aria-label="Section" value={tab} onChange={(e) => setTab(e.target.value)}>{groups.map((g) => <optgroup key={g.title} label={g.title}>{g.items.map(([key, label]) => <option key={key} value={key}>{label}</option>)}</optgroup>)}</select>
+        </header>
+
+        <div className="adm-content">
+          {loadError && <div role="alert" className="adm-alert err" style={{ marginBottom: 18 }}>{loadError} <button className="adm-btn sm" onClick={() => { setLoadError(''); load(); }}>Try again</button></div>}
+
+          {tab === 'overview' && <DashboardAdmin extra={{ orders: stats?.orders, customers: stats?.customers, revenue: stats?.revenue }} />}
 
           {tab === 'products' && <ProductsAdmin products={products} reload={load} />}
 
@@ -131,15 +130,10 @@ export default function Admin() {
             ))}
           </div>}
 
-          {tab === 'donations' && <div className="space-y-3">
-            {!donations.length && <p className="text-sm text-neutral-400">No donations yet.</p>}
-            {donations.map((d) => (
-              <div key={d.id} className="flex justify-between rounded-3xl border bg-white p-5">
-                <div><b>{d.reference}</b><div className="text-sm text-neutral-500">{d.user?.name || d.user?.phone}</div></div>
-                <div className="text-right"><b>₹{d.amount}</b><div className="text-xs">{d.paymentStatus}</div></div>
-              </div>
-            ))}
-          </div>}
+          {tab === 'donations' && <DonationsAdmin donations={donations} reload={load} />}
+          {tab === 'donors' && <DonorsAdmin />}
+          {tab === 'campaigns' && <CampaignsAdmin />}
+          {tab === 'live' && <LiveAdmin />}
 
           {tab === 'customers' && <div className="overflow-x-auto rounded-3xl border bg-white">
             <table className="w-full text-left text-sm">

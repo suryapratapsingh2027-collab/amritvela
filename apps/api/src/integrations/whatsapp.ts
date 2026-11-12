@@ -281,3 +281,25 @@ export async function sendWhatsAppInteractive(to: string, rawSpec: InteractiveSp
     throw error;
   }
 }
+
+/** Sends an approved message template (the only kind of message WhatsApp allows outside the 24-hour customer window). */
+export async function sendWhatsAppTemplate(to: string, name: string, language: string, bodyParams: string[]): Promise<any> {
+  if (isMockMode()) {
+    console.warn('[WhatsApp] Mock mode enabled or credentials missing; template not sent.');
+    return { mock: true, to, name };
+  }
+  try {
+    const response = await axios.post(
+      getWhatsAppMessagesUrl(),
+      {
+        messaging_product: 'whatsapp', to, type: 'template',
+        template: { name, language: { code: language }, components: bodyParams.length ? [{ type: 'body', parameters: bodyParams.map((text) => ({ type: 'text', text })) }] : [] },
+      },
+      { headers: { Authorization: `Bearer ${env.WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' }, timeout: 20000 },
+    );
+    return response.data;
+  } catch (error: unknown) {
+    logWhatsAppError('template', error);
+    throw error;
+  }
+}

@@ -15,7 +15,7 @@ export async function createPayment(amount: number, receipt: string) {
 /** Creates a customer-facing Razorpay Payment Link (amount is INR). */
 export async function createDonationPaymentLink(input: {
   amount: number; reference: string; donationId: string; name?: string | null;
-  email?: string | null; phone: string;
+  email?: string | null; phone: string; campaignTitle?: string | null;
 }) {
   if (env.MOCK_PROVIDERS) {
     return { id: `mock_pl_${input.reference}`, short_url: `${env.WEB_URL}/donate?reference=${encodeURIComponent(input.reference)}&mock=1`, amount: Math.round(input.amount * 100), currency: 'INR', status: 'created', notes: { donationId: input.donationId, reference: input.reference } };
@@ -27,7 +27,7 @@ export async function createDonationPaymentLink(input: {
     currency: 'INR',
     accept_partial: false,
     reference_id: input.reference,
-    description: `Donation to Amrit Vela Trust (${input.reference})`,
+    description: `Donation to Amrit Vela Trust${input.campaignTitle ? ` — ${input.campaignTitle}` : ''} (${input.reference})`.slice(0, 2000),
     customer: { name: input.name || 'Donor', email: input.email || undefined, contact: input.phone },
     notify: { sms: false, email: false },
     reminder_enable: true,

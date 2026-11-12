@@ -18,11 +18,13 @@ import { createDonationLink } from './donation-payment-link';
 import { reconcileDonation, reconcileOrder, sendReceiptPdf } from './payments';
 import { sendOrderInvoice } from './fulfillment';
 import { getSocialLinks } from './settings';
+import { activeCampaignViews, descriptionFor, isAcceptingDonations, campaignStats, toView } from './campaigns';
+import { getLiveSettings, liveStatusForBot } from './live';
 import { isSellable, money, shippingFor } from './pricing';
 import { M } from '../i18n/messages';
 import { DEFAULT_LANG, LANGS, LANG_TITLES, isLang, normalizeLang, t, type Lang, type MessageKey } from '../i18n';
 import {
-  MAX_DONATION, extractDonationRef, extractOrderRef, extractPin, findProducts, hasBuyIntent, hasCatalogIntent, hasDocsIntent,
+  MAX_DONATION, hasLiveIntent, isAlertsOff, isAlertsOn, extractDonationRef, extractOrderRef, extractPin, findProducts, hasBuyIntent, hasCatalogIntent, hasDocsIntent,
   hasDonationIntent, hasHumanIntent, hasPhotoIntent, hasPriceIntent, hasSocialIntent, hasTrackIntent, isCancelOrMenu, isGreeting, isLanguageRequest, isMenuWord, isNo,
   isPaymentClaim, isReceiptRequest, isYes, normalize, parseAmount, parseCartItems, parseExplicitQuantity, validateAddress, validateName,
   type CartMention,
@@ -43,8 +45,8 @@ type State =
   | { step: 'AWAIT_NAME'; at: number; items: CartItem[]; address?: string; pin?: string }
   | { step: 'AWAIT_ADDRESS'; at: number; items: CartItem[] }
   | { step: 'AWAIT_CONFIRM'; at: number; items: CartItem[]; address: string; pin: string }
-  | { step: 'AWAIT_DONATION_AMOUNT'; at: number }
-  | { step: 'AWAIT_DONATION_NAME'; at: number; amount: number };
+  | { step: 'AWAIT_DONATION_AMOUNT'; at: number; campaignId?: string }
+  | { step: 'AWAIT_DONATION_NAME'; at: number; amount: number; campaignId?: string };
 
 type ProductRow = { id: string; name: string; slug: string; price: number; stock: number; active: boolean; currency: string; imageUrl: string | null };
 
@@ -109,15 +111,15 @@ function languageMenu(c: Ctx): BotReply {
 }
 
 async function mainMenu(c: Ctx, prefix?: string): Promise<BotReply> {
-  const [trusts, social, docs] = await Promise.all([activeTrusts(), socialLines(), activeDocuments()]);
+  const [trusts, docs, live] = await Promise.all([activeTrusts(), activeDocuments(), getLiveSettings()]);
   const trustRows = [
     trusts.length
       ? { id: 'menu:info', title: T(c, 'm_trusts'), description: T(c, 'm_trusts_d') }
       : { id: 'menu:info', title: T(c, 'm_info'), description: T(c, 'm_info_d') },
     { id: 'menu:donate', title: T(c, 'm_donate'), description: T(c, 'm_donate_d') },
+    ...(live.url && live.enabled ? [{ id: 'menu:live', title: T(c, 'm_live'), description: T(c, 'm_live_d') }] : []),
     { id: 'menu:contact', title: T(c, 'm_contact') },
   ];
-  if (social.length) trustRows.push({ id: 'menu:social', title: T(c, 'm_social') });
   const helpRows = [
     ...(docs.length ? [{ id: 'menu:docs', title: T(c, 'm_docs'), description: T(c, 'm_docs_d') }] : []),
     { id: 'menu:human', title: T(c, 'm_human') },
@@ -130,7 +132,6 @@ async function mainMenu(c: Ctx, prefix?: string): Promise<BotReply> {
       { title: T(c, 'sec_shop'), rows: [
         { id: 'menu:products', title: T(c, 'm_products'), description: T(c, 'm_products_d') },
         { id: 'menu:status', title: T(c, 'm_status') },
-        { id: 'menu:receipt', title: T(c, 'm_receipt') },
       ] },
       { title: T(c, 'sec_help'), rows: helpRows },
     ],
@@ -152,8 +153,9 @@ async function topicReply(c: Ctx, topic: Topic): Promise<BotReply> {
   return buttons('INFO', `${T(c, `tx_${topic}` as MessageKey)}\n\n${T(c, 'after_topic')}`, [{ id: 'menu:donate', title: T(c, 'b_donate') }, more, { id: 'menu:main', title: T(c, 'b_menu') }]);
 }
 
-function contactReply(c: Ctx): BotReply {
-  return buttons('CONTACT', T(c, 'tx_contact'), [{ id: 'menu:donate', title: T(c, 'b_donate') }, { id: 'menu:info', title: T(c, 'b_more') }, { id: 'menu:main', title: T(c, 'b_menu') }]);
+async function contactReply(c: Ctx): Promise<BotReply> {
+  const social = await socialLines();
+  return buttons('CONTACT', `${T(c, 'tx_contact')}${social.length ? `\n\n${T(c, 'tx_social')}\n${social.join('\n')}` : ''}`, [{ id: 'menu:donate', title: T(c, 'b_donate') }, { id: 'menu:info', title: T(c, 'b_more') }, { id: 'menu:main', title: T(c, 'b_menu') }]);
 }
 
 async function socialReply(c: Ctx): Promise<BotReply> {
@@ -162,18 +164,46 @@ async function socialReply(c: Ctx): Promise<BotReply> {
   return buttons('SOCIAL', `${T(c, 'tx_social')}\n\n${social.join('\n')}`, [{ id: 'menu:main', title: T(c, 'b_menu') }]);
 }
 
-/** "Which Trust?" list: the built-in Amrit Vela Trust plus every active trust from the admin panel. */
+/** "Which Trust?" list for Trust information. */
 async function trustsMenu(c: Ctx, purpose: 'info' | 'donate'): Promise<BotReply> {
+  if (purpose === 'donate') return donateMenu(c);
   const trusts = await activeTrusts();
-  if (!trusts.length) return purpose === 'info' ? topicsMenu(c) : donationMenu(c);
-  const prefix = purpose === 'info' ? 'trust' : 'dtrust';
-  return list(c, purpose === 'info' ? 'TRUSTS' : 'DONATE_WHICH', {
-    body: T(c, purpose === 'info' ? 'trusts_body' : 'donate_which_body'), button: T(c, 'trusts_button'),
+  if (!trusts.length) return topicsMenu(c);
+  return list(c, 'TRUSTS', {
+    body: T(c, 'trusts_body'), button: T(c, 'trusts_button'),
     sections: [{ title: T(c, 'trusts_section'), rows: [
-      { id: `${prefix}:amritvela`, title: 'Amrit Vela Trust', description: T(c, purpose === 'info' ? 'trust_av_d' : 'donate_av_d') },
-      ...trusts.map((x) => ({ id: `${prefix}:${x.slug}`, title: x.name, description: T(c, purpose === 'info' ? 'trust_row_d' : 'donate_qr_d') })),
+      { id: 'trust:amritvela', title: 'Amrit Vela Trust', description: T(c, 'trust_av_d') },
+      ...trusts.map((x) => ({ id: `trust:${x.slug}`, title: x.name, description: T(c, 'trust_row_d') })),
     ] }],
   });
+}
+
+/** Donate: general donation (Razorpay), running campaigns (progress shown) and the QR trusts. Straight to amounts when there is nothing else. */
+async function donateMenu(c: Ctx): Promise<BotReply> {
+  const [campaigns, trusts] = await Promise.all([activeCampaignViews(), activeTrusts()]);
+  if (!campaigns.length && !trusts.length) return donationMenu(c);
+  const shownCampaigns = campaigns.slice(0, Math.max(1, 9 - Math.min(trusts.length, 3)));
+  const shownTrusts = trusts.slice(0, 9 - shownCampaigns.length);
+  const sections = [{ title: T(c, 'donate_section'), rows: [{ id: 'dtrust:amritvela', title: 'Amrit Vela Trust', description: T(c, 'donate_av_d') }] }] as { title?: string; rows: { id: string; title: string; description?: string }[] }[];
+  if (shownCampaigns.length) sections.push({ title: T(c, 'donate_campaigns_section'), rows: shownCampaigns.map((x) => ({ id: `camp:${x.slug}`, title: x.title, description: T(c, 'camp_row_d', { raised: x.raised.toLocaleString('en-IN'), target: x.targetAmount.toLocaleString('en-IN') }) })) });
+  if (shownTrusts.length) sections.push({ title: T(c, 'donate_trusts_section'), rows: shownTrusts.map((x) => ({ id: `dtrust:${x.slug}`, title: x.name, description: T(c, 'donate_qr_d') })) });
+  return list(c, 'DONATE_WHICH', { body: T(c, 'donate_which_body'), button: T(c, 'trusts_button'), sections });
+}
+
+/** A campaign: image, description, goal / raised / percent, and the quick-amount list for that campaign. */
+async function campaignReply(c: Ctx, slug: string): Promise<BotReply> {
+  const row = await db.campaign.findUnique({ where: { slug } });
+  if (!row || !isAcceptingDonations(row)) return { intent: 'CAMPAIGN', text: T(c, 'camp_gone') };
+  const stats = (await campaignStats([row.id])).get(row.id)!;
+  const v = toView(row as any, stats);
+  const desc = descriptionFor(row, c.lang);
+  const body = T(c, 'camp_body', { title: row.title, desc: desc.length > 420 ? `${desc.slice(0, 417)}…` : desc, target: row.targetAmount.toLocaleString('en-IN'), raised: stats.raised.toLocaleString('en-IN'), percent: v.percent });
+  const reply = list(c, 'CAMPAIGN', {
+    body, button: T(c, 'donate_button'),
+    sections: [{ title: T(c, 'donate_section'), rows: [...DONATION_AMOUNTS.map((a) => ({ id: `camp:${slug}:${a}`, title: `₹${a.toLocaleString('en-IN')}` })), { id: `camp:${slug}:other`, title: T(c, 'amt_other') }] }],
+  });
+  const img = toWhatsAppImageUrl(row.imageUrl);
+  return img ? { ...reply, image: { url: img, caption: row.title } } : reply;
 }
 
 const infoFor = (tr: { infoEn: string; infoHi: string | null; infoHing: string | null; infoPa: string | null }, lang: Lang) =>
@@ -276,6 +306,10 @@ export async function routeWhatsAppMessage(input: RouteInput): Promise<BotReply 
     return c.langChosen ? mainMenu(c) : languageMenu(c);
   }
 
+  // Live Kirtan opt-out / opt-in. With a checkout in progress "stop" still means "cancel this".
+  if (!state && isAlertsOff(text)) { await db.user.update({ where: { phone: c.phone }, data: { liveAlerts: false } }); return { intent: 'ALERTS', text: T(c, 'alerts_off') }; }
+  if (isAlertsOn(text)) { await db.user.update({ where: { phone: c.phone }, data: { liveAlerts: true } }); return { intent: 'ALERTS', text: T(c, 'alerts_on') }; }
+
   if (isCancelOrMenu(text) || (inConfirm && isNo(text))) {
     const wasActive = Boolean(state);
     await writeState(c.conversationId, null);
@@ -304,10 +338,10 @@ export async function routeWhatsAppMessage(input: RouteInput): Promise<BotReply 
 
   const trust = await matchTrust(text);
   if (trust) return managedTrustReply(c, trust.slug);
-  // "pdf chahiye" / "instagram link" are not product orders, unless the message also names a product.
-  if (hasSocialIntent(text) || hasDocsIntent(text)) {
+  // "pdf chahiye" / "instagram link" / "live kirtan" are not product orders, unless the message also names a product.
+  if (hasSocialIntent(text) || hasDocsIntent(text) || hasLiveIntent(text)) {
     const namesProduct = parseCartItems(text, await loadProducts()).items.length > 0;
-    if (!namesProduct) return hasSocialIntent(text) ? socialReply(c) : docsMenu(c);
+    if (!namesProduct) return hasLiveIntent(text) ? liveReply(c) : hasSocialIntent(text) ? socialReply(c) : docsMenu(c);
   }
 
   return handleShop(c, text);
@@ -342,7 +376,8 @@ async function handleReplyId(c: Ctx, id: string): Promise<BotReply | null> {
         case 'docs': await writeState(c.conversationId, null); return docsMenu(c);
         case 'lang': await writeState(c.conversationId, null); return languageMenu(c);
         case 'human': return humanReply(c);
-        case 'donate': await writeState(c.conversationId, null); return trustsMenu(c, 'donate');
+        case 'donate': await writeState(c.conversationId, null); return donateMenu(c);
+        case 'live': await writeState(c.conversationId, null); return liveReply(c);
         case 'products': {
           const state = await readState(c.conversationId);
           const items = state && 'items' in state ? state.items : [];
@@ -368,6 +403,19 @@ async function handleReplyId(c: Ctx, id: string): Promise<BotReply | null> {
       return topicReply(c, arg as Topic);
     }
     case 'doc': return documentReply(c, arg);
+    case 'camp': {
+      const [slug, amountArg] = arg.split(':');
+      if (!amountArg) { await writeState(c.conversationId, null); return campaignReply(c, slug); }
+      const campaign = await db.campaign.findUnique({ where: { slug } });
+      if (!campaign || !isAcceptingDonations(campaign)) return { intent: 'CAMPAIGN', text: T(c, 'camp_gone') };
+      if (amountArg === 'other') {
+        await writeState(c.conversationId, { step: 'AWAIT_DONATION_AMOUNT', at: Date.now(), campaignId: campaign.id });
+        return { intent: 'DONATION_AMOUNT', text: T(c, 'donate_ask_amount') };
+      }
+      const amount = Number(amountArg);
+      if (!DONATION_AMOUNTS.includes(amount)) return null;
+      return donationWithAmount(c, amount, campaign.id);
+    }
     case 'amt': {
       if (arg === 'other') {
         await writeState(c.conversationId, { step: 'AWAIT_DONATION_AMOUNT', at: Date.now() });
@@ -411,15 +459,25 @@ async function handleReplyId(c: Ctx, id: string): Promise<BotReply | null> {
   return null;
 }
 
+/* ------------------------------------------------------------------ live kirtan */
+
+async function liveReply(c: Ctx): Promise<BotReply> {
+  const live = await liveStatusForBot(c.lang);
+  if (!live.url || !live.enabled) return { intent: 'LIVE', text: T(c, 'live_none') };
+  if (live.isLiveNow) return buttons('LIVE', T(c, 'live_now_reply', { title: live.title, url: live.url }), [{ id: 'menu:main', title: T(c, 'b_menu') }]);
+  const text = live.timings ? T(c, 'live_next_reply', { title: live.title, timings: live.timings, url: live.url }) : T(c, 'live_no_timings', { title: live.title, url: live.url });
+  return buttons('LIVE', text, [{ id: 'menu:main', title: T(c, 'b_menu') }]);
+}
+
 /* ------------------------------------------------------------------ donations */
 
-async function donationWithAmount(c: Ctx, amount: number): Promise<BotReply> {
+async function donationWithAmount(c: Ctx, amount: number, campaignId?: string): Promise<BotReply> {
   const user = await db.user.findUnique({ where: { phone: c.phone } });
   if (!user?.name) {
-    await writeState(c.conversationId, { step: 'AWAIT_DONATION_NAME', at: Date.now(), amount });
+    await writeState(c.conversationId, { step: 'AWAIT_DONATION_NAME', at: Date.now(), amount, ...(campaignId ? { campaignId } : {}) });
     return { intent: 'DONATION_NAME', text: T(c, 'donate_ask_name', { amount: amount.toLocaleString('en-IN') }) };
   }
-  return createDonationReply(c, amount);
+  return createDonationReply(c, amount, campaignId);
 }
 
 async function handleDonationStart(c: Ctx, text: string, allowBare = false): Promise<BotReply> {
@@ -434,14 +492,15 @@ async function handleDonationStart(c: Ctx, text: string, allowBare = false): Pro
   return donationWithAmount(c, parsed.amount);
 }
 
-async function createDonationReply(c: Ctx, amount: number): Promise<BotReply> {
+async function createDonationReply(c: Ctx, amount: number, campaignId?: string): Promise<BotReply> {
   await writeState(c.conversationId, null);
   try {
     const user = await db.user.findUnique({ where: { phone: c.phone } });
-    const result = await createDonationLink({ phone: c.phone, name: user?.name, email: user?.email, amount, lang: c.lang });
+    const result = await createDonationLink({ phone: c.phone, name: user?.name, email: user?.email, amount, lang: c.lang, campaignId });
     if (result.mock) return { intent: 'DONATION', text: T(c, 'donate_mock', { ref: result.reference }) };
     return { intent: 'DONATION', text: result.message };
   } catch (e: any) {
+    if (e?.code === 'CAMPAIGN_CLOSED') return { intent: 'CAMPAIGN', text: T(c, 'camp_gone') };
     console.error('[BOT] Donation link creation failed:', e?.error?.description || e?.message || e);
     return { intent: 'DONATION_ERROR', text: T(c, 'link_error') };
   }
@@ -661,7 +720,7 @@ async function handleState(c: Ctx, text: string, state: State): Promise<BotReply
   switch (state.step) {
     case 'AWAIT_DONATION_AMOUNT': {
       const parsed = parseAmount(text, { allowBare: true });
-      if (parsed.amount != null) return donationWithAmount(c, parsed.amount);
+      if (parsed.amount != null) return donationWithAmount(c, parsed.amount, state.campaignId);
       if (parsed.reason === 'decimal' || parsed.reason === 'range') return handleDonationStart(c, text, true);
       // A product message while waiting for an amount: leave donation mode.
       if (parseCartItems(text, await loadProducts()).items.length || hasBuyIntent(text) || hasCatalogIntent(text)) { await writeState(c.conversationId, null); return null; }
@@ -672,7 +731,7 @@ async function handleState(c: Ctx, text: string, state: State): Promise<BotReply
       const name = validateName(text);
       if (!name.ok) return { intent: 'DONATION_NAME', text: T(c, 'donate_name_retry') };
       await db.user.update({ where: { phone: c.phone }, data: { name: name.name } });
-      return createDonationReply(c, state.amount);
+      return createDonationReply(c, state.amount, state.campaignId);
     }
 
     case 'AWAIT_PRODUCT':

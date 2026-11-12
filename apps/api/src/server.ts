@@ -12,6 +12,8 @@ import webhooks from './routes/webhooks';
 import assistant from './routes/assistant';
 import media from './routes/media';
 import documents from './routes/documents';
+import campaigns from './routes/campaigns';
+import { startLiveScheduler } from './services/live';
 import { startPaymentSweeper } from './services/payments';
 
 const app = express();
@@ -82,6 +84,7 @@ app.get('/health', (_req, res) => {
 app.use('/api/auth', auth);
 app.use('/api/products', products);
 app.use('/api/documents', documents);
+app.use('/api/campaigns', campaigns);
 app.use('/api/donations', donations);
 app.use('/api/orders', orders);
 app.use('/api/admin', admin);
@@ -123,6 +126,7 @@ app.use(
 app.listen(env.PORT, () => {
   console.log(`API listening on ${env.API_URL}`);
   startPaymentSweeper();
+  startLiveScheduler();
 });
 
 process.on('unhandledRejection', (reason) => console.error('[UNHANDLED REJECTION]', reason));

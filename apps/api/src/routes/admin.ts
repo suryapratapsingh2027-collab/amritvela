@@ -4,6 +4,14 @@ import { db } from '../db';
 import { shipOrder } from '../services/fulfillment';
 import { sendWhatsAppText, whatsappErrorInfo, whatsappLive } from '../integrations/whatsapp';
 import { z } from 'zod';
+import { campaignStats, listCampaignViews, toView, type CampaignRow } from '../services/campaigns';
+import { buildDonationReceipt } from '../services/receipt-doc';
+import { donationDashboard, donationsCsv } from '../services/reports';
+import { donorProfile, listDonors, type DonorSort } from '../services/donors';
+import { audienceSummary, clearLiveNow, describeSlot, getLiveSettings, nextFire, saveLiveSettings, sendLiveTest, startBroadcast, validateSlot, validateYoutubeUrl, type Slot } from '../services/live';
+import { normalizePhone } from '../utils/phone';
+import { normalizeLang } from '../i18n';
+import { isYmd, istParts } from '../services/time';
 import { SOCIAL_FIELDS, getSocialLinks, saveSocialLinks, validateSocialUrl, type SocialField } from '../services/settings';
 
 const r = Router(); r.use(auth);
@@ -57,7 +65,7 @@ const productInput = z.object({
 // Works with zod v3 and v4: type errors (missing / not a number) are mapped by field instead of constructor options.
 const FIELD_TYPE_MESSAGE: Record<string, string> = {
   name: 'Enter the product name.', price: 'Enter the price as a number.', stock: 'Enter the stock as a number.',
-  title: 'Enter a title.', content: 'Enter the content.', text: 'Enter a message.', mode: 'mode must be AI or HUMAN',
+  title: 'Enter a title.', content: 'Enter the content.', targetAmount: 'Enter the target amount as a number.', text: 'Enter a message.', mode: 'mode must be AI or HUMAN',
 };
 const zerr = (e: z.ZodError) => {
   const issue = e.issues[0];
@@ -115,7 +123,7 @@ r.delete('/products/:id', async (req, res) => {
 });
 r.get('/orders', async (_, res) => res.json(await db.order.findMany({ include: { user: true, items: { include: { product: true } } }, orderBy: { createdAt: 'desc' } })));
 r.post('/orders/:id/ship', async (req, res) => { try { res.json(await shipOrder(req.params.id)); } catch (e: any) { res.status(400).json({ error: e.message }); } });
-r.get('/donations', async (_, res) => res.json(await db.donation.findMany({ include: { user: true }, orderBy: { createdAt: 'desc' } })));
+r.get('/donations', async (_, res) => res.json(await db.donation.findMany({ include: { user: true, campaign: { select: { title: true } } }, orderBy: { createdAt: 'desc' }, take: 500 })));
 r.get('/customers', async (_, res) => res.json(await db.user.findMany({ include: { _count: { select: { orders: true, donations: true, conversations: true } } }, orderBy: { createdAt: 'desc' } })));
 /* ------------------------------------------------------------------ support inbox */
 
@@ -335,6 +343,242 @@ r.delete('/trusts/:id', async (req, res) => {
   if (!(await db.trust.findUnique({ where: { id }, select: { id: true } }))) return res.status(404).json({ error: 'Trust not found' });
   await db.trust.delete({ where: { id } });
   res.status(204).end();
+});
+
+/* ------------------------------------------------------------------ donation receipts (download / resend) */
+
+r.get('/donations/:id/receipt', async (req, res) => {
+  const d = await db.donation.findUnique({ where: { id: String(req.params.id) }, select: { id: true, paymentStatus: true } });
+  if (!d) return res.status(404).json({ error: 'Donation not found' });
+  if (d.paymentStatus !== 'PAID') return res.status(409).json({ error: 'A receipt is available only after the payment is verified.' });
+  const { pdf, fileName } = await buildDonationReceipt(d.id);
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.send(pdf);
+});
+
+r.post('/donations/:id/resend-receipt', async (req, res) => {
+  const d = await db.donation.findUnique({ where: { id: String(req.params.id) }, include: { user: true } });
+  if (!d) return res.status(404).json({ error: 'Donation not found' });
+  if (d.paymentStatus !== 'PAID') return res.status(409).json({ error: 'A receipt can be sent only after the payment is verified.' });
+  if (!whatsappLive()) return res.status(503).json({ error: 'WhatsApp is not configured (MOCK mode, or the access token / phone number ID is missing), so the receipt cannot be sent.' });
+  if (!/^\d{10,15}$/.test(d.user.phone)) return res.status(409).json({ error: 'This donor has no WhatsApp number on record.' });
+  try {
+    const { sendReceiptPdf } = await import('../services/payments');
+    await sendReceiptPdf(d.id);
+    res.json({ ok: true, message: `Receipt sent to ${d.user.phone} on WhatsApp.` });
+  } catch (e: any) {
+    const info = whatsappErrorInfo(e);
+    if (info.windowClosed) return res.status(409).json({ error: 'This donor has not messaged in the last 24 hours, so WhatsApp does not allow sending the receipt now. Use “Download” and share the PDF, or ask the donor to send “receipt” to the bot.' });
+    res.status(502).json({ error: `WhatsApp could not deliver the receipt: ${info.message}` });
+  }
+});
+
+/* ------------------------------------------------------------------ dashboard + reports */
+
+r.get('/reports/dashboard', async (_req, res) => res.json(await donationDashboard()));
+
+r.get('/reports/donations.csv', async (req, res) => {
+  const q = z.object({ from: z.string().optional(), to: z.string().optional(), status: z.string().optional(), campaignId: z.string().optional() }).safeParse(req.query);
+  if (!q.success) return res.status(400).json({ error: 'Invalid filters.' });
+  if ((q.data.from && !isYmd(q.data.from)) || (q.data.to && !isYmd(q.data.to))) return res.status(400).json({ error: 'Dates must be in YYYY-MM-DD format.' });
+  const out = await donationsCsv(q.data);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="donations-${q.data.from || 'all'}-to-${q.data.to || 'today'}.csv"`);
+  res.setHeader('X-Report-Count', String(out.count)); res.setHeader('X-Report-Paid-Total', String(out.paidTotal));
+  res.send(out.csv);
+});
+
+/* ------------------------------------------------------------------ donors */
+
+r.get('/donors', async (req, res) => {
+  const sort = (['total', 'recent', 'name', 'count'] as const).includes(req.query.sort as any) ? (req.query.sort as DonorSort) : 'recent';
+  res.json(await listDonors({ search: String(req.query.search || ''), sort, minTotal: Number(req.query.minTotal) || 0, page: Number(req.query.page) || 1, pageSize: Number(req.query.pageSize) || 25 }));
+});
+
+r.get('/donors/:id', async (req, res) => {
+  const p = await donorProfile(String(req.params.id));
+  if (!p) return res.status(404).json({ error: 'Donor not found' });
+  res.json(p);
+});
+
+r.patch('/donors/:id', async (req, res) => {
+  const parsed = z.object({
+    name: z.preprocess(emptyToNull, z.string().trim().min(2, 'Enter at least 2 characters for the name.').max(80).nullable().optional()),
+    email: z.preprocess(emptyToNull, z.string().trim().max(120).refine((v) => /^\S+@\S+\.\S+$/.test(v), 'Enter a valid email address.').nullable().optional()),
+    notes: z.preprocess(emptyToNull, z.string().trim().max(2000, 'Notes can be up to 2000 characters.').nullable().optional()),
+    liveAlerts: z.boolean().optional(),
+  }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: zerr(parsed.error) });
+  const id = String(req.params.id);
+  if (!(await db.user.findUnique({ where: { id }, select: { id: true } }))) return res.status(404).json({ error: 'Donor not found' });
+  const d = parsed.data;
+  await db.user.update({ where: { id }, data: { ...(d.name !== undefined ? { name: d.name } : {}), ...(d.email !== undefined ? { email: d.email } : {}), ...(d.notes !== undefined ? { notes: d.notes } : {}), ...(d.liveAlerts !== undefined ? { liveAlerts: d.liveAlerts } : {}) } });
+  res.json(await donorProfile(id));
+});
+
+/* ------------------------------------------------------------------ campaigns */
+
+const campaignInput = z.object({
+  title: z.string().trim().min(3, 'Enter the campaign title (at least 3 characters).').max(80, 'Keep the title within 80 characters.'),
+  status: z.enum(['ACTIVE', 'PAUSED', 'COMPLETED']),
+  descriptionEn: z.string().trim().max(1200, 'English description is too long (maximum 1200 characters).'),
+  descriptionHi: optionalText(1200, 'Hindi description is too long (maximum 1200 characters).'),
+  descriptionHing: optionalText(1200, 'Hinglish description is too long (maximum 1200 characters).'),
+  descriptionPa: optionalText(1200, 'Punjabi description is too long (maximum 1200 characters).'),
+  imageUrl: z.preprocess(emptyToNull, z.string().trim().max(2000).refine((v) => /^https:\/\//i.test(v), 'The image link must start with https://').nullable().optional()),
+  targetAmount: z.coerce.number().int('Enter the target in whole rupees.').min(100, 'The target must be at least ₹100.').max(1_000_000_000, 'The target is too large.'),
+  startsAt: z.preprocess(emptyToNull, z.string().refine(isYmd, 'Enter the start date as YYYY-MM-DD.').nullable().optional()),
+  endsAt: z.preprocess(emptyToNull, z.string().refine(isYmd, 'Enter the end date as YYYY-MM-DD.').nullable().optional()),
+  sortOrder: z.coerce.number().int().min(0).max(10000),
+});
+
+async function uniqueCampaignSlug(title: string, exceptId?: string) {
+  const base = slugify(title).slice(0, 50) || 'campaign';
+  for (let i = 0; i < 50; i++) {
+    const candidate = i === 0 ? base : `${base}-${i + 1}`;
+    const clash = await db.campaign.findUnique({ where: { slug: candidate } });
+    if (!clash || clash.id === exceptId) return candidate;
+  }
+  return `${base}-${Date.now()}`;
+}
+const dayStart = (ymd?: string | null) => (ymd ? new Date(`${ymd}T00:00:00+05:30`) : null);
+const dayEnd = (ymd?: string | null) => (ymd ? new Date(`${ymd}T23:59:59+05:30`) : null);
+
+r.get('/campaigns', async (_req, res) => res.json(await listCampaignViews()));
+
+r.post('/campaigns', async (req, res) => {
+  const parsed = campaignInput.partial({ status: true, descriptionEn: true, sortOrder: true }).safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: zerr(parsed.error) });
+  const d = parsed.data;
+  if (d.startsAt && d.endsAt && d.endsAt < d.startsAt) return res.status(400).json({ error: 'The end date cannot be before the start date.' });
+  const created = await db.campaign.create({ data: {
+    slug: await uniqueCampaignSlug(d.title), title: d.title, status: d.status ?? 'ACTIVE', descriptionEn: d.descriptionEn ?? '', descriptionHi: d.descriptionHi ?? null, descriptionHing: d.descriptionHing ?? null,
+    descriptionPa: d.descriptionPa ?? null, imageUrl: d.imageUrl ?? null, targetAmount: d.targetAmount, startsAt: dayStart(d.startsAt), endsAt: dayEnd(d.endsAt), sortOrder: d.sortOrder ?? (await db.campaign.count()),
+  } });
+  res.status(201).json(toView(created as CampaignRow, { raised: 0, donations: 0, donors: 0 }));
+});
+
+r.patch('/campaigns/:id', async (req, res) => {
+  const id = String(req.params.id);
+  const existing = await db.campaign.findUnique({ where: { id } });
+  if (!existing) return res.status(404).json({ error: 'Campaign not found' });
+  const parsed = campaignInput.partial().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: zerr(parsed.error) });
+  const d = parsed.data;
+  const starts = d.startsAt !== undefined ? d.startsAt : existing.startsAt ? istParts(existing.startsAt).ymd : null;
+  const ends = d.endsAt !== undefined ? d.endsAt : existing.endsAt ? istParts(existing.endsAt).ymd : null;
+  if (starts && ends && ends < starts) return res.status(400).json({ error: 'The end date cannot be before the start date.' });
+  const updated = await db.campaign.update({ where: { id }, data: {
+    ...(d.title !== undefined ? { title: d.title } : {}), ...(d.status !== undefined ? { status: d.status } : {}),
+    ...(d.descriptionEn !== undefined ? { descriptionEn: d.descriptionEn } : {}), ...(d.descriptionHi !== undefined ? { descriptionHi: d.descriptionHi } : {}),
+    ...(d.descriptionHing !== undefined ? { descriptionHing: d.descriptionHing } : {}), ...(d.descriptionPa !== undefined ? { descriptionPa: d.descriptionPa } : {}),
+    ...(d.imageUrl !== undefined ? { imageUrl: d.imageUrl } : {}), ...(d.targetAmount !== undefined ? { targetAmount: d.targetAmount } : {}),
+    ...(d.startsAt !== undefined ? { startsAt: dayStart(d.startsAt) } : {}), ...(d.endsAt !== undefined ? { endsAt: dayEnd(d.endsAt) } : {}), ...(d.sortOrder !== undefined ? { sortOrder: d.sortOrder } : {}),
+  } });
+  res.json(toView(updated as CampaignRow, (await campaignStats([id])).get(id)!));
+});
+
+// A campaign that already received donations is never deleted (its history must stay intact): complete or pause it instead.
+r.delete('/campaigns/:id', async (req, res) => {
+  const id = String(req.params.id);
+  if (!(await db.campaign.findUnique({ where: { id }, select: { id: true } }))) return res.status(404).json({ error: 'Campaign not found' });
+  const n = await db.donation.count({ where: { campaignId: id } });
+  if (n > 0) return res.status(409).json({ error: `This campaign has ${n} donation record${n === 1 ? '' : 's'}, so it cannot be deleted. Set its status to Completed or Paused instead.` });
+  await db.campaign.delete({ where: { id } });
+  res.status(204).end();
+});
+
+/* ------------------------------------------------------------------ Live Kirtan alerts */
+
+const slotShape = (x: Slot, now = new Date()) => ({ ...x, days: x.days.split(',').filter(Boolean).map(Number), summary: describeSlot(x, 'en'), next: nextFire(x, now) });
+
+r.get('/live', async (_req, res) => {
+  const now = new Date();
+  const [settings, audience, schedules, broadcasts] = await Promise.all([
+    getLiveSettings(now), audienceSummary(now), db.liveSchedule.findMany({ orderBy: [{ time: 'asc' }, { createdAt: 'asc' }] }), db.broadcast.findMany({ orderBy: { createdAt: 'desc' }, take: 15 }),
+  ]);
+  res.json({ settings, audience, schedules: (schedules as Slot[]).map((x) => slotShape(x, now)), broadcasts, now: now.toISOString() });
+});
+
+r.put('/live/settings', async (req, res) => {
+  const parsed = z.object({
+    url: z.string().trim().max(300), title: z.string().trim().min(2, 'Enter a title (at least 2 characters).').max(60, 'Keep the title within 60 characters.'),
+    enabled: z.boolean(), windowHours: z.coerce.number().int().min(1, 'Choose between 1 and 12 hours.').max(12, 'Choose between 1 and 12 hours.'),
+  }).partial().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: zerr(parsed.error) });
+  const d = parsed.data;
+  if (d.url) { const problem = validateYoutubeUrl(d.url); if (problem) return res.status(400).json({ error: problem }); }
+  await saveLiveSettings(d);
+  res.json(await getLiveSettings());
+});
+
+const slotBody = z.object({ label: z.string(), time: z.string(), days: z.array(z.number()).optional(), onceDate: z.preprocess(emptyToNull, z.string().nullable().optional()), active: z.boolean().optional() });
+
+r.post('/live/schedules', async (req, res) => {
+  const parsed = slotBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid schedule.' });
+  const d = parsed.data;
+  const problem = validateSlot({ label: d.label, time: d.time, days: d.days, onceDate: d.onceDate });
+  if (problem) return res.status(400).json({ error: problem });
+  const created = await db.liveSchedule.create({ data: { label: d.label.trim(), time: d.time, days: d.onceDate ? '' : [...new Set(d.days)].sort().join(','), onceDate: d.onceDate || null, active: d.active ?? true } });
+  res.status(201).json(slotShape(created as Slot));
+});
+
+r.patch('/live/schedules/:id', async (req, res) => {
+  const id = String(req.params.id);
+  const existing = await db.liveSchedule.findUnique({ where: { id } });
+  if (!existing) return res.status(404).json({ error: 'Schedule not found' });
+  const parsed = slotBody.partial().safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid schedule.' });
+  const d = parsed.data;
+  const merged = { label: d.label ?? existing.label, time: d.time ?? existing.time, onceDate: d.onceDate !== undefined ? d.onceDate : existing.onceDate, days: d.days ?? existing.days.split(',').filter(Boolean).map(Number) };
+  const problem = validateSlot(merged);
+  if (problem) return res.status(400).json({ error: problem });
+  const updated = await db.liveSchedule.update({ where: { id }, data: {
+    label: merged.label.trim(), time: merged.time, onceDate: merged.onceDate || null, days: merged.onceDate ? '' : [...new Set(merged.days)].sort().join(','),
+    ...(d.active !== undefined ? { active: d.active } : {}), lastFiredKey: d.time !== undefined || d.days !== undefined || d.onceDate !== undefined ? null : existing.lastFiredKey,
+  } });
+  res.json(slotShape(updated as Slot));
+});
+
+r.delete('/live/schedules/:id', async (req, res) => {
+  const id = String(req.params.id);
+  if (!(await db.liveSchedule.findUnique({ where: { id }, select: { id: true } }))) return res.status(404).json({ error: 'Schedule not found' });
+  await db.liveSchedule.delete({ where: { id } });
+  res.status(204).end();
+});
+
+/** "Go live now": alerts every subscribed customer immediately (the admin chooses the title; the link comes from the settings). */
+r.post('/live/broadcast', async (req, res) => {
+  const settings = await getLiveSettings();
+  if (!settings.url) return res.status(400).json({ error: 'Add the YouTube live link in the settings first.' });
+  const title = String(req.body?.title || settings.title).trim().slice(0, 60) || settings.title;
+  const running = await db.broadcast.findFirst({ where: { status: 'RUNNING', createdAt: { gte: new Date(Date.now() - 10 * 60_000) } } });
+  if (running) return res.status(409).json({ error: 'An alert is already being sent. Please wait until it finishes.' });
+  const b = await startBroadcast({ trigger: 'MANUAL', title, url: settings.url });
+  res.status(202).json(b);
+});
+
+r.post('/live/end', async (_req, res) => { await clearLiveNow(); res.json(await getLiveSettings()); });
+
+r.post('/live/test', async (req, res) => {
+  const settings = await getLiveSettings();
+  if (!settings.url) return res.status(400).json({ error: 'Add the YouTube live link in the settings first.' });
+  const phone = normalizePhone(req.body?.phone);
+  if (!phone) return res.status(400).json({ error: 'Enter a valid 10-digit mobile number.' });
+  if (!whatsappLive()) return res.status(503).json({ error: 'WhatsApp is not configured (MOCK mode, or the access token / phone number ID is missing).' });
+  const user = await db.user.findUnique({ where: { phone }, select: { language: true } });
+  const out = await sendLiveTest(phone, settings.title, settings.url, normalizeLang(user?.language));
+  if (out.result === 'sent') return res.json({ ok: true, message: `Test alert sent to ${phone}.` });
+  if (out.result === 'skipped') return res.status(409).json({ error: 'This number has not messaged the bot in the last 24 hours, and no approved template is configured, so WhatsApp does not allow the message.' });
+  res.status(502).json({ error: `WhatsApp could not deliver the test: ${out.error}` });
+});
+
+r.get('/live/broadcasts/:id', async (req, res) => {
+  const b = await db.broadcast.findUnique({ where: { id: String(req.params.id) } });
+  if (!b) return res.status(404).json({ error: 'Not found' });
+  res.json(b);
 });
 
 export default r;

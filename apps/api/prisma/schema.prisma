@@ -34,7 +34,7 @@ enum OrderStatus {
 }
 
 model User {
-  // Preferred chat language chosen from the WhatsApp language list: en | hi | hing | pa | mr (null = not chosen yet)
+  // Preferred chat language chosen from the WhatsApp language list: en | hi | hing | pa (null = not chosen yet)
   language String?
   id String @id @default(cuid())
   phone String @unique
@@ -46,6 +46,10 @@ model User {
   donations Donation[]
   orders Order[]
   conversations Conversation[]
+  // Live Kirtan alerts: customers who have chatted with the bot receive them until they reply STOP.
+  liveAlerts Boolean @default(true)
+  // Private admin notes about the donor (never shown to the customer).
+  notes String?
 }
 
 model AdminUser {
@@ -100,11 +104,16 @@ model Donation {
   paidAt DateTime?
   receiptSentAt DateTime?
   receiptAttempts Int @default(0)
+  // Unique, sequential per financial year, e.g. AVT/2026-27/000123. Assigned when the payment is verified.
+  receiptNumber String? @unique
+  campaignId String?
   createdAt DateTime @default(now())
   user User @relation(fields:[userId], references:[id])
+  campaign Campaign? @relation(fields:[campaignId], references:[id], onDelete: SetNull)
 
   @@index([paymentStatus, createdAt])
   @@index([razorpayOrderId])
+  @@index([campaignId])
 }
 
 model Order {
@@ -268,4 +277,63 @@ model Setting {
   key String @id
   value String
   updatedAt DateTime @updatedAt
+}
+
+// Fundraising campaigns shown on the website (progress bars) and in the WhatsApp Donate list.
+model Campaign {
+  id String @id @default(cuid())
+  slug String @unique
+  title String
+  status String @default("ACTIVE") // ACTIVE | PAUSED | COMPLETED
+  descriptionEn String @default("")
+  descriptionHi String?
+  descriptionHing String?
+  descriptionPa String?
+  imageUrl String?
+  targetAmount Int
+  startsAt DateTime?
+  endsAt DateTime?
+  sortOrder Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  donations Donation[]
+}
+
+// Atomic sequence numbers (receipt numbers per financial year).
+model Counter {
+  key String @id
+  value Int @default(0)
+}
+
+// When the Trust's YouTube Live kirtan normally starts. The admin can add, move or pause slots at any time.
+model LiveSchedule {
+  id String @id @default(cuid())
+  label String
+  time String // HH:mm, India time
+  days String @default("0,1,2,3,4,5,6") // comma separated, 0 = Sunday
+  onceDate String? // YYYY-MM-DD: a one-off slot for a special day
+  active Boolean @default(true)
+  lastFiredKey String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// One "live kirtan" alert run (manual, scheduled or test) with delivery counters.
+model Broadcast {
+  id String @id @default(cuid())
+  kind String @default("LIVE_KIRTAN")
+  trigger String // MANUAL | SCHEDULE | TEST
+  title String
+  url String
+  scheduleId String?
+  status String @default("RUNNING") // RUNNING | DONE | FAILED
+  total Int @default(0)
+  sent Int @default(0)
+  failed Int @default(0)
+  skipped Int @default(0)
+  error String?
+  createdAt DateTime @default(now())
+  finishedAt DateTime?
+
+  @@index([createdAt])
 }

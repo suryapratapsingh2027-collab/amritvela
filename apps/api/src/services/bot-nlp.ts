@@ -266,3 +266,10 @@ const DOCS = /(?:^|[^a-z])(pdf|pdfs|download|downloads|brochure|brochures|docume
 export function hasDocsIntent(text: string): boolean { return DOCS.test(text); }
 const SOCIAL = /(?:^|[^a-z])(instagram|insta|facebook|fb|youtube|whatsapp\s*group|whatsapp\s*community|community|follow(?:\s*us)?)(?:$|[^a-z])|इंस्टाग्राम|फेसबुक|यूट्यूब|ਇੰਸਟਾਗ੍ਰਾਮ|ਫੇਸਬੁੱਕ|ਯੂਟਿਊਬ/i;
 export function hasSocialIntent(text: string): boolean { return SOCIAL.test(text); }
+
+const LIVE = /(?:^|[^a-z])live(?:$|[^a-z])|लाइव|ਲਾਈਵ/i;
+export function hasLiveIntent(text: string): boolean { return LIVE.test(text); }
+const ALERTS_OFF = /^(stop|unsubscribe|stop alerts|alerts off|stop live|stop live alerts|alerts band|band alerts)$/i;
+const ALERTS_ON = /^(subscribe|resubscribe|alerts on|start alerts|start live alerts|alerts chalu)$/i;
+export function isAlertsOff(text: string): boolean { return ALERTS_OFF.test(normalize(text)); }
+export function isAlertsOn(text: string): boolean { return ALERTS_ON.test(normalize(text)); }

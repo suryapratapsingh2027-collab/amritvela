@@ -150,10 +150,10 @@ export const M2 = {
   addr_long: m(`The address is too long. Please send only the delivery address.`, `पता बहुत लंबा है। कृपया केवल डिलीवरी पता भेजें।`, `Address bahut lamba hai. Kripya sirf delivery address bhejein.`, `ਪਤਾ ਬਹੁਤ ਲੰਮਾ ਹੈ। ਕਿਰਪਾ ਕਰਕੇ ਸਿਰਫ਼ ਡਿਲੀਵਰੀ ਪਤਾ ਭੇਜੋ।`),
 
   /* ---------------------------------------------------------------- notifications sent by other services */
-  don_receipt_intro: m(`Thank you! Your donation of ₹{amount} is confirmed.\nReference: {ref}\nYour PDF receipt is being sent below.`,
-    `धन्यवाद! आपका ₹{amount} का दान पक्का हो गया है।\nसंदर्भ: {ref}\nआपकी PDF रसीद नीचे भेजी जा रही है।`,
-    `Dhanyavaad! Aapka ₹{amount} ka donation confirm ho gaya hai.\nReference: {ref}\nAapki PDF receipt neeche bheji ja rahi hai.`,
-    `ਧੰਨਵਾਦ! ਤੁਹਾਡਾ ₹{amount} ਦਾ ਦਾਨ ਪੱਕਾ ਹੋ ਗਿਆ ਹੈ।\nਹਵਾਲਾ: {ref}\nਤੁਹਾਡੀ PDF ਰਸੀਦ ਹੇਠਾਂ ਭੇਜੀ ਜਾ ਰਹੀ ਹੈ।`,
+  don_receipt_intro: m(`Thank you! Your donation of ₹{amount} is confirmed.\nReceipt No: {receipt}\nReference: {ref}\nYour PDF receipt is being sent below.`,
+    `धन्यवाद! आपका ₹{amount} का दान पक्का हो गया है।\nरसीद संख्या: {receipt}\nसंदर्भ: {ref}\nआपकी PDF रसीद नीचे भेजी जा रही है।`,
+    `Dhanyavaad! Aapka ₹{amount} ka donation confirm ho gaya hai.\nReceipt No: {receipt}\nReference: {ref}\nAapki PDF receipt neeche bheji ja rahi hai.`,
+    `ਧੰਨਵਾਦ! ਤੁਹਾਡਾ ₹{amount} ਦਾ ਦਾਨ ਪੱਕਾ ਹੋ ਗਿਆ ਹੈ।\nਰਸੀਦ ਨੰਬਰ: {receipt}\nਹਵਾਲਾ: {ref}\nਤੁਹਾਡੀ PDF ਰਸੀਦ ਹੇਠਾਂ ਭੇਜੀ ਜਾ ਰਹੀ ਹੈ।`,
   ),
   receipt_caption: m(`Donation receipt {ref}`, `दान रसीद {ref}`, `Donation receipt {ref}`, `ਦਾਨ ਰਸੀਦ {ref}`),
   order_paid: m(`Thank you! Your payment is verified.\nOrder {number} is confirmed (total ₹{total}). Tracking details will be shared on this WhatsApp once it is dispatched.`,

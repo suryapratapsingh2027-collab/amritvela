@@ -19,10 +19,10 @@ r.post('/', async (req, res) => {
     const phone = normalizePhone(req.body?.phone);
     const address = String(req.body?.address || '').replace(/\s+/g, ' ').trim();
 
-    if (!phone) return res.status(400).json({ error: 'Kripya sahi 10-digit mobile number likhein.' });
-    if (!String(name || '').trim() || String(name).trim().length < 2) return res.status(400).json({ error: 'Kripya apna poora naam likhein.' });
-    if (address.length < 15 || !extractPin(address)) return res.status(400).json({ error: 'Kripya poora address 6-digit PIN code ke saath likhein.' });
-    if (!Array.isArray(items) || !items.length || items.length > 30) return res.status(400).json({ error: 'Cart khali hai.' });
+    if (!phone) return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number.' });
+    if (!String(name || '').trim() || String(name).trim().length < 2) return res.status(400).json({ error: 'Please enter your full name.' });
+    if (address.length < 15 || !extractPin(address)) return res.status(400).json({ error: 'Please enter the full delivery address including the 6-digit PIN code.' });
+    if (!Array.isArray(items) || !items.length || items.length > 30) return res.status(400).json({ error: 'Your cart is empty.' });
 
     const clean = items.map((i: any) => ({
       productId: String(i.productId),
@@ -53,7 +53,7 @@ r.post('/', async (req, res) => {
       }
 
       if (p.stock < i.quantity) {
-        throw new Error(`${p.name} ki itni quantity abhi available nahi hai. Cart me quantity kam karein.`);
+        throw new Error(`The requested quantity of ${p.name} is not available right now. Please reduce the quantity in your cart.`);
       }
 
       return {

@@ -24,6 +24,13 @@ const schema = z
     // true = on every boot, reset the ADMIN_EMAIL account's password to ADMIN_PASSWORD (emergency recovery). Default: only create the first admin.
     ADMIN_RESET_ON_BOOT: z.enum(['true', 'false']).default('false'),
 
+    // Live Kirtan alerts outside WhatsApp's 24-hour window need a Meta-approved template (see AUDIT_REPORT.md for the text to submit).
+    // Body variables: {{1}} = title, {{2}} = YouTube link. Leave empty to alert only customers who messaged in the last 24 hours.
+    WHATSAPP_LIVE_TEMPLATE_NAME: z.string().optional(),
+    WHATSAPP_LIVE_TEMPLATE_LANG: z.string().default('hi'),
+    // Pause between messages of one alert run (milliseconds), to stay well under WhatsApp's sending limits.
+    BROADCAST_DELAY_MS: z.coerce.number().int().min(0).max(2000).default(60),
+
     // Optional public links shown in the WhatsApp menu ("Follow us"). Rows/links are simply omitted when unset.
     TRUST_YOUTUBE_URL: z.string().url().optional().or(z.literal('').transform(() => undefined)),
     TRUST_FACEBOOK_URL: z.string().url().optional().or(z.literal('').transform(() => undefined)),

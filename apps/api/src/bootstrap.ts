@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import { db } from './db';
 import { env } from './config';
+import { backfillReceiptNumbers } from './services/receipt-number';
 import { TRUST_KNOWLEDGE_TITLE, TRUST_KNOWLEDGE_VERSION, trustKnowledge } from './services/trust-knowledge';
 
 async function bootstrap(){
@@ -19,6 +20,10 @@ async function bootstrap(){
     console.warn('[BOOTSTRAP] ADMIN_RESET_ON_BOOT=true: admin password reset from environment. Set it back to false.');
   }
   // Demo products are no longer re-created on every boot (they polluted the live catalogue and WhatsApp replies).
+  // Old verified donations (from before receipt numbers existed) get their numbers, in the order they were paid.
+  const numbered = await backfillReceiptNumbers();
+  if (numbered) console.log(`[BOOTSTRAP] Receipt numbers assigned to ${numbered} older donations`);
+
   // A ready-to-fill draft for the second trust. It stays hidden from customers until the admin writes the information
   // and (optionally) uploads the UPI QR code in Admin > Trusts, then switches it on.
   if ((await db.trust.count()) === 0) {

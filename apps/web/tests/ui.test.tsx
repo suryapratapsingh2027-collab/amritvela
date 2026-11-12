@@ -378,3 +378,150 @@ describe('SocialAdmin (Instagram / Facebook / WhatsApp group links)', () => {
     expect(calls.filter((c) => c.method === 'PUT').at(-1)!.body).toMatchObject({ instagram: 'https://www.instagram.com/trust/', facebook: 'https://www.facebook.com/trust', whatsappGroup: 'https://chat.whatsapp.com/AbCd1234' });
   });
 });
+
+import DashboardAdmin from '../app/admin/DashboardAdmin';
+import DonationsAdmin from '../app/admin/DonationsAdmin';
+import DonorsAdmin from '../app/admin/DonorsAdmin';
+import CampaignsAdmin from '../app/admin/CampaignsAdmin';
+import LiveAdmin from '../app/admin/LiveAdmin';
+
+const zeros = (n: number) => Array.from({ length: n }, (_, i) => ({ key: `2026-11-${String(i + 1).padStart(2, '0')}`, total: i === n - 1 ? 1500 : 0, count: i === n - 1 ? 2 : 0 }));
+const dash = {
+  totals: { allTime: { total: 25000, count: 40, average: 625, donors: 31 }, today: { total: 1500, count: 2 }, month: { total: 9000, count: 12 }, prevMonth: { total: 6000, count: 8 }, year: { total: 25000, count: 40 }, financialYear: { total: 22000, count: 35 }, monthGrowthPercent: 50, pending: { total: 700, count: 2 }, failed: 3 },
+  daily: zeros(30), monthly: zeros(12).map((p, i) => ({ ...p, key: `2026-${String(i + 1).padStart(2, '0')}` })), yearly: [{ key: '2026', total: 25000, count: 40 }],
+  topCampaigns: [{ id: 'c1', title: 'Langar Seva', target: 50000, raised: 20000 }],
+  recent: [{ id: 'd1', reference: 'DON-1', receiptNumber: 'AVT/2026-27/000001', amount: 500, status: 'PAID', createdAt: '2026-11-12T10:00:00Z', paidAt: '2026-11-12T10:01:00Z', donor: 'Ramesh Kumar', campaign: 'Langar Seva' }],
+};
+
+describe('Round 6 admin: Dashboard', () => {
+  it('shows totals, growth, top campaigns, recent donations and switches the chart period', async () => {
+    routes['GET /api/admin/reports/dashboard'] = () => ({ json: dash });
+    render(<DashboardAdmin />);
+    expect((await screen.findAllByText('₹25,000')).length).toBeGreaterThan(0);
+    expect(screen.getByText(/\+50% vs last month/)).toBeInTheDocument();
+    expect(screen.getByText('Langar Seva', { selector: 'span' })).toBeInTheDocument();
+    expect(screen.getByText('AVT/2026-27/000001')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: /Donations, daily/ })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '12 months' }));
+    expect(screen.getByRole('img', { name: /Donations, monthly/ })).toBeInTheDocument();
+  });
+  it('shows a readable error with a retry when the dashboard fails', async () => {
+    routes['GET /api/admin/reports/dashboard'] = () => ({ status: 500, json: { error: 'Database is down' } });
+    render(<DashboardAdmin />);
+    expect(await screen.findByText(/Database is down/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Try again/ })).toBeInTheDocument();
+  });
+});
+
+describe('Round 6 admin: Donations + receipts', () => {
+  const rows = [
+    { id: 'd1', reference: 'DON-1', receiptNumber: 'AVT/2026-27/000001', amount: 500, paymentStatus: 'PAID', createdAt: '2026-11-12T10:00:00Z', paidAt: '2026-11-12T10:01:00Z', user: { name: 'Ramesh', phone: '919876500001' }, campaign: { title: 'Langar Seva' } },
+    { id: 'd2', reference: 'DON-2', receiptNumber: null, amount: 300, paymentStatus: 'PENDING', createdAt: '2026-11-12T11:00:00Z', user: { name: 'Sita', phone: '919876500002' }, campaign: null },
+  ];
+  it('lists receipt numbers, offers receipt actions only for PAID, and filters by search', async () => {
+    render(<DonationsAdmin donations={rows} reload={() => undefined} />);
+    expect(screen.getByText('AVT/2026-27/000001')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: /Download receipt/ })).toHaveLength(1);
+    await userEvent.type(screen.getByLabelText('Search donations'), 'sita');
+    expect(screen.queryByText('AVT/2026-27/000001')).not.toBeInTheDocument(); expect(screen.getByText('DON-2')).toBeInTheDocument();
+    await userEvent.clear(screen.getByLabelText('Search donations')); await userEvent.type(screen.getByLabelText('Search donations'), 'zzz');
+    expect(screen.getByText(/No donation matches your search/)).toBeInTheDocument();
+  });
+  it('resend: success message shown; the 24-hour-window refusal is shown as a sentence', async () => {
+    const reload = vi.fn();
+    routes['POST /api/admin/donations/d1/resend-receipt'] = () => ({ json: { ok: true, message: 'Receipt sent to 919876500001 on WhatsApp.' } });
+    render(<DonationsAdmin donations={rows} reload={reload} />);
+    await userEvent.click(screen.getByRole('button', { name: /Resend receipt on WhatsApp/ }));
+    expect(await screen.findByText(/Receipt sent to 919876500001/)).toBeInTheDocument(); expect(reload).toHaveBeenCalled();
+    routes['POST /api/admin/donations/d1/resend-receipt'] = () => ({ status: 409, json: { error: 'This donor has not messaged in the last 24 hours, so WhatsApp does not allow sending the receipt now.' } });
+    await userEvent.click(screen.getByRole('button', { name: /Resend receipt on WhatsApp/ }));
+    expect(await screen.findByText(/last 24 hours/)).toBeInTheDocument();
+  });
+});
+
+describe('Round 6 admin: Donors', () => {
+  it('lists donors, searches (debounced, sent to the API) and opens the profile with history', async () => {
+    routes['GET /api/admin/donors/u1'] = () => ({ json: { id: 'u1', name: 'Ramesh Kumar', phone: '919876500001', email: null, notes: 'Regular', language: 'hi', liveAlerts: true, stats: { totalDonated: 1200, donations: 2, attempts: 3, averageDonation: 600, lastDonationAt: '2026-11-12T10:00:00Z', orders: 1 }, donations: [{ id: 'd1', reference: 'DON-1', receiptNumber: 'AVT/2026-27/000001', amount: 500, status: 'PAID', createdAt: '2026-11-12T10:00:00Z', paidAt: '2026-11-12T10:00:00Z', campaign: null }] } });
+    routes['GET /api/admin/donors'] = () => ({ json: { page: 1, pageSize: 25, total: 1, donors: [{ id: 'u1', name: 'Ramesh Kumar', phone: '919876500001', language: 'hi', donations: 2, attempts: 3, totalDonated: 1200, lastDonationAt: '2026-11-12T10:00:00Z' }] } });
+    render(<DonorsAdmin />);
+    expect(await screen.findByText('₹1,200')).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText('Search donors'), 'ramesh');
+    await waitFor(() => expect(calls.some((c) => c.url.includes('search=ramesh'))).toBe(true));
+    await userEvent.click(screen.getByRole('button', { name: 'Ramesh Kumar' }));
+    expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    expect(await screen.findByText('AVT/2026-27/000001')).toBeInTheDocument(); expect(screen.getByDisplayValue('Regular')).toBeInTheDocument();
+  });
+  it('rejects an invalid email before calling the API', async () => {
+    routes['GET /api/admin/donors/u1'] = () => ({ json: { id: 'u1', name: 'R', phone: '1', email: null, notes: '', language: 'en', liveAlerts: true, stats: { totalDonated: 0, donations: 0, attempts: 0, averageDonation: 0, orders: 0 }, donations: [] } });
+    routes['GET /api/admin/donors'] = () => ({ json: { page: 1, pageSize: 25, total: 1, donors: [{ id: 'u1', name: 'R', phone: '1', donations: 0, attempts: 0, totalDonated: 0 }] } });
+    render(<DonorsAdmin />);
+    await userEvent.click(await screen.findByRole('button', { name: 'R' }));
+    await userEvent.type(await screen.findByLabelText(/Email/), 'not-an-email'); await userEvent.click(screen.getByRole('button', { name: 'Save details' }));
+    expect(await screen.findByText('Enter a valid email address.')).toBeInTheDocument();
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+  });
+});
+
+describe('Round 6 admin: Campaigns', () => {
+  const camp = { id: 'c1', slug: 'langar-seva', title: 'Langar Seva', status: 'ACTIVE', effectiveStatus: 'ACTIVE', targetAmount: 50000, raised: 20000, percent: 40, donations: 12, donors: 9, goalReached: false, endsAt: null, startsAt: null, imageUrl: null, descriptionEn: 'Daily langar', descriptionHi: null, descriptionHing: null, descriptionPa: null };
+  it('shows progress bars with collected amount, status and donor counts', async () => {
+    routes['GET /api/admin/campaigns'] = () => ({ json: [camp] });
+    render(<CampaignsAdmin />);
+    expect(await screen.findByText('Langar Seva')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: /Langar Seva progress/ })).toHaveAttribute('aria-valuenow', '40');
+    expect(screen.getByText(/₹20,000 raised/)).toBeInTheDocument(); expect(screen.getByText(/12 donations · 9 donors/)).toBeInTheDocument();
+  });
+  it('new campaign: validates title/target/dates in plain English, then creates it', async () => {
+    routes['GET /api/admin/campaigns'] = () => ({ json: [] });
+    routes['POST /api/admin/campaigns'] = () => ({ status: 201, json: camp });
+    render(<CampaignsAdmin />);
+    await userEvent.click(await screen.findByRole('button', { name: /New campaign/ }));
+    await userEvent.click(screen.getByRole('button', { name: 'Create campaign' }));
+    expect(await screen.findByText(/campaign title/)).toBeInTheDocument();
+    await userEvent.type(screen.getByLabelText('Campaign title'), 'Medical Camp'); await userEvent.type(screen.getByLabelText(/Target amount/), '50');
+    await userEvent.click(screen.getByRole('button', { name: 'Create campaign' }));
+    expect(await screen.findByText(/at least ₹100/)).toBeInTheDocument();
+    await userEvent.clear(screen.getByLabelText(/Target amount/)); await userEvent.type(screen.getByLabelText(/Target amount/), '75000');
+    await userEvent.click(screen.getByRole('button', { name: 'Create campaign' }));
+    await waitFor(() => expect(calls.find((c) => c.method === 'POST')?.body).toMatchObject({ title: 'Medical Camp', targetAmount: 75000, status: 'ACTIVE' }));
+  });
+  it('a campaign that has donations cannot be deleted: the server sentence is shown', async () => {
+    routes['GET /api/admin/campaigns'] = () => ({ json: [camp] });
+    routes['DELETE /api/admin/campaigns/c1'] = () => ({ status: 409, json: { error: 'This campaign has 12 donation records, so it cannot be deleted. Set its status to Completed or Paused instead.' } });
+    vi.stubGlobal('confirm', () => true);
+    render(<CampaignsAdmin />);
+    await userEvent.click(await screen.findByRole('button', { name: /Delete/ }));
+    expect(await screen.findByText(/cannot be deleted/)).toBeInTheDocument();
+  });
+});
+
+describe('Round 6 admin: Live Kirtan', () => {
+  const live = (over: any = {}) => ({ now: '2026-11-12T03:00:00Z', settings: { url: 'https://www.youtube.com/watch?v=abc', title: 'Subah ka Kirtan', enabled: true, windowHours: 3, liveUntil: null, isLiveNow: false }, audience: { subscribers: 10, withinWindow: 4, outsideWindow: 6, optedOut: 1, templateConfigured: false, reachable: 4, whatsappLive: true }, schedules: [{ id: 's1', label: 'Subah 9 baje', time: '09:00', days: [0, 1, 2, 3, 4, 5, 6], onceDate: null, active: true, summary: 'Every day at 9:00 AM', next: { ymd: '2026-11-13', time: '09:00' } }], broadcasts: [], ...over });
+  it('shows the schedule, the audience and the 24-hour-window warning', async () => {
+    routes['GET /api/admin/live'] = () => ({ json: live() });
+    render(<LiveAdmin />);
+    expect(await screen.findByText('9:00 AM')).toBeInTheDocument(); expect(screen.getByText(/Every day at 9:00 AM/)).toBeInTheDocument();
+    expect(screen.getByText(/6 subscriber\(s\) are outside that window/)).toBeInTheDocument();
+  });
+  it('rejects a non-YouTube link and a bad schedule before calling the API', async () => {
+    routes['GET /api/admin/live'] = () => ({ json: live() });
+    render(<LiveAdmin />);
+    const url = await screen.findByLabelText('YouTube live link'); await userEvent.clear(url); await userEvent.type(url, 'https://example.com/x');
+    await userEvent.click(screen.getByRole('button', { name: 'Save settings' }));
+    expect(await screen.findByText(/Paste a YouTube link/)).toBeInTheDocument(); expect(calls.some((c) => c.method === 'PUT')).toBe(false);
+    await userEvent.click(screen.getByRole('button', { name: 'One time' })); await userEvent.click(screen.getByRole('button', { name: /Add schedule/ }));
+    expect(await screen.findByText(/Choose the date/)).toBeInTheDocument(); expect(calls.some((c) => c.url.endsWith('/schedules') && c.method === 'POST')).toBe(false);
+  });
+  it('adds a 12 noon schedule and sends a Go-live-now alert after confirmation', async () => {
+    routes['GET /api/admin/live'] = () => ({ json: live() });
+    routes['POST /api/admin/live/schedules'] = () => ({ status: 201, json: {} });
+    routes['POST /api/admin/live/broadcast'] = () => ({ status: 202, json: {} });
+    vi.stubGlobal('confirm', () => true);
+    render(<LiveAdmin />);
+    const time = await screen.findByLabelText('Time'); fireEvent.change(time, { target: { value: '12:00' } });
+    await userEvent.click(screen.getByRole('button', { name: /Add schedule/ }));
+    await waitFor(() => expect(calls.find((c) => c.url.endsWith('/schedules') && c.method === 'POST')?.body).toMatchObject({ time: '12:00', days: [0, 1, 2, 3, 4, 5, 6] }));
+    await userEvent.click(screen.getByRole('button', { name: /Go live now/ }));
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith('/live/broadcast') && c.method === 'POST')).toBe(true));
+  });
+});

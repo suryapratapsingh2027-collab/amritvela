@@ -1,7 +1,7 @@
 'use client';
 
 import Script from 'next/script';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ArrowLeft, CheckCircle2, HeartHandshake, ShieldCheck } from 'lucide-react';
 import Link from 'next/link';
 import { api } from '../../lib/api';
@@ -14,6 +14,17 @@ export default function Donate() {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState<any>(null);
+  const [campaigns, setCampaigns] = useState<any[]>([]);
+  const [campaign, setCampaign] = useState('');
+
+  useEffect(() => {
+    api<any[]>('/api/campaigns').then((list) => {
+      const active = list || []; setCampaigns(active);
+      const wanted = new URLSearchParams(window.location.search).get('campaign');
+      if (wanted && active.some((c) => c.slug === wanted && c.acceptingDonations)) setCampaign(wanted);
+    }).catch(() => undefined); // campaigns are optional: the general donation form still works
+  }, []);
+  const picked = campaigns.find((c) => c.slug === campaign);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -22,7 +33,7 @@ export default function Donate() {
     if (!/^[6-9]\d{9}$/.test(phone.replace(/\D/g, '').replace(/^(91|0)(?=\d{10}$)/, ''))) { alert('Kripya sahi 10-digit mobile number likhein (receipt isi number se jude rahegi).'); return; }
     setLoading(true);
     try {
-      const result = await api<any>('/api/donations', { method: 'POST', body: JSON.stringify({ amount: Number(amount), name, phone, email }) });
+      const result = await api<any>('/api/donations', { method: 'POST', body: JSON.stringify({ amount: Number(amount), name, phone, email, ...(campaign ? { campaignSlug: campaign } : {}) }) });
       if (result.payment.id.startsWith('mock_')) {
         const paid = await api<any>(`/api/donations/${result.donationId}/mock-pay`, { method: 'POST' });
         setDone(paid.donation);
@@ -82,6 +93,20 @@ export default function Donate() {
                 <form onSubmit={submit} style={{ paddingTop: 40 }}>
                   <span className="section-kicker"><span>02</span> Donation details</span>
                   <h2>Choose an amount.</h2>
+                  {campaigns.length > 0 && (
+                    <div className="camp-list" role="radiogroup" aria-label="Donate to">
+                      <button type="button" role="radio" aria-checked={!campaign} className={`camp-card${!campaign ? ' on' : ''}`} onClick={() => setCampaign('')}><strong>General donation</strong><small>Wherever the Trust needs it most</small></button>
+                      {campaigns.map((c) => (
+                        <button type="button" role="radio" aria-checked={campaign === c.slug} disabled={!c.acceptingDonations} key={c.slug} className={`camp-card${campaign === c.slug ? ' on' : ''}`} onClick={() => setCampaign(c.slug)}>
+                          {c.imageUrl && <img src={c.imageUrl} alt="" />}
+                          <strong>{c.title}</strong>
+                          <div className="camp-bar" role="progressbar" aria-valuenow={c.percent} aria-valuemin={0} aria-valuemax={100} aria-label={`${c.title} progress`}><i style={{ width: `${c.percent}%` }} /></div>
+                          <small>₹{Number(c.raised).toLocaleString('en-IN')} raised of ₹{Number(c.targetAmount).toLocaleString('en-IN')} · {c.percent}%{c.acceptingDonations ? '' : ' · Completed'}</small>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {picked?.description?.en && <p className="lead-copy" style={{ marginTop: 14 }}>{picked.description.en}</p>}
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 9, marginTop: 20 }}>
                     {['500', '1000', '2500'].map((value) => <button type="button" key={value} onClick={() => setAmount(value)} className="btn" style={{ borderColor: amount === value ? 'var(--green)' : 'var(--line)', background: amount === value ? 'var(--green)' : '#fff', color: amount === value ? '#fff' : 'var(--ink)' }}>₹{value}</button>)}
                   </div>
@@ -91,7 +116,7 @@ export default function Donate() {
                     <input className="input" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="WhatsApp / mobile number" required />
                     <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (optional)" />
                   </div>
-                  <button disabled={loading} className="btn btn-primary" style={{ width: '100%', marginTop: 16 }}>{loading ? 'Preparing payment…' : `Continue with ₹${amount}`}</button>
+                  <button disabled={loading} className="btn btn-primary" style={{ width: '100%', marginTop: 16 }}>{loading ? 'Preparing payment…' : `Continue with ₹${amount}${picked ? ` · ${picked.title}` : ''}`}</button>
                 </form>
               )}
             </div>

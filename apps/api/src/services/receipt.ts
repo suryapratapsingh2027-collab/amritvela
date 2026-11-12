@@ -38,17 +38,20 @@ function row(d: PDFKit.PDFDocument, label: string, value: string) {
 
 /** Donation receipt. Only ever generated for donations whose DB status is PAID. */
 export function makeReceipt(data: {
-  reference: string; name?: string | null; amount: number; status: string;
-  paymentId?: string | null; paidAt?: Date | string | null; phone?: string | null;
+  reference: string; receiptNumber?: string | null; name?: string | null; amount: number; status: string;
+  paymentId?: string | null; paidAt?: Date | string | null; phone?: string | null; email?: string | null; campaign?: string | null;
 }) {
   return render((d) => {
     header(d, 'Donation Receipt');
-    row(d, 'Receipt / Reference', data.reference);
+    if (data.receiptNumber) row(d, 'Receipt No.', data.receiptNumber);
+    row(d, 'Donation reference', data.reference);
     row(d, 'Donor', data.name || 'Donor');
     if (data.phone) row(d, 'Mobile', data.phone.replace(/^(\d{2})\d+(\d{3})$/, '$1xxxxx$2'));
+    if (data.email) row(d, 'Email', data.email);
+    if (data.campaign) row(d, 'Campaign', data.campaign);
     row(d, 'Amount received', `INR ${data.amount.toLocaleString('en-IN')}`);
     row(d, 'Payment status', data.status);
-    if (data.paymentId) row(d, 'Razorpay payment ID', data.paymentId);
+    if (data.paymentId) row(d, 'Transaction reference (Razorpay)', data.paymentId);
     row(d, 'Payment date', fmtDate(data.paidAt));
     d.moveDown(1.5).fontSize(11).text('Thank you for your generous contribution to Amrit Vela Trust. May your seva be blessed.', { align: 'left' });
     d.moveDown(2).fontSize(8).fillColor('#666').text('This is a system-generated receipt. Please contact the Trust for 80G / tax related queries.');

@@ -5,7 +5,8 @@ import { createAndSendDonationLink } from '../services/donation-payment-link';
 import { auth } from '../middleware/auth';
 import { env } from '../config';
 import { normalizePhone } from '../utils/phone';
-import { makeReceipt } from '../services/receipt';
+import { isAcceptingDonations } from '../services/campaigns';
+import { buildDonationReceipt } from '../services/receipt-doc';
 import { deliverDonationReceipt, markDonationPaid } from '../services/payments';
 
 
@@ -30,13 +31,19 @@ r.post('/', async (req, res) => {
     const { name, email, amount } = req.body || {};
     const phone = normalizePhone(req.body?.phone);
     const value = Number(amount);
-    if (!phone) return res.status(400).json({ error: 'Kripya sahi 10-digit mobile number likhein.' });
+    if (!phone) return res.status(400).json({ error: 'Please enter a valid 10-digit mobile number.' });
     if (!Number.isSafeInteger(value) || value <= 0 || value > 10000000) {
       return res.status(400).json({ error: 'phone and a whole-number donation amount between ₹1 and ₹1,00,00,000 are required' });
     }
     const user = await db.user.upsert({ where: { phone }, update: { name, email }, create: { phone, name, email } });
     const reference = `DON-${Date.now()}-${Math.floor(Math.random() * 90000 + 10000)}`;
-    const donation = await db.donation.create({ data: { reference, userId: user.id, amount: Math.round(value) } });
+    let campaignId: string | null = null;
+    if (req.body?.campaignSlug) {
+      const campaign = await db.campaign.findUnique({ where: { slug: String(req.body.campaignSlug) } });
+      if (!campaign || !isAcceptingDonations(campaign)) return res.status(400).json({ error: 'This campaign is not accepting donations right now.' });
+      campaignId = campaign.id;
+    }
+    const donation = await db.donation.create({ data: { reference, userId: user.id, amount: Math.round(value), campaignId } });
     const payment = await createPayment(Math.round(value), reference);
     await db.donation.update({ where: { id: donation.id }, data: { razorpayOrderId: String((payment as any).id) } });
     res.status(201).json({ donationId: donation.id, reference, payment, keyId: process.env.RAZORPAY_KEY_ID || null });
@@ -67,12 +74,12 @@ r.post('/:id/mock-pay', async (req, res) => {
 });
 
 r.get('/:id/receipt', async (req, res) => {
-  const d = await db.donation.findUnique({ where: { id: String(req.params.id) }, include: { user: true } });
+  const d = await db.donation.findUnique({ where: { id: String(req.params.id) }, select: { id: true, paymentStatus: true } });
   if (!d) return res.status(404).json({ error: 'Donation not found' });
-  if (d.paymentStatus !== 'PAID') return res.status(400).json({ error: 'Receipt is available after payment' });
-  const pdf = await makeReceipt({ reference: d.reference, name: d.user.name, amount: d.amount, status: d.paymentStatus, paymentId: d.razorpayPaymentId, paidAt: d.paidAt, phone: d.user.phone });
+  if (d.paymentStatus !== 'PAID') return res.status(409).json({ error: 'Receipt is available only after the payment is verified.' });
+  const { pdf, fileName } = await buildDonationReceipt(d.id);
   res.setHeader('Content-Type', 'application/pdf');
-  res.setHeader('Content-Disposition', `inline; filename="${d.reference}.pdf"`);
+  res.setHeader('Content-Disposition', `inline; filename="${fileName}"`);
   res.send(pdf);
 });
 
