@@ -7,7 +7,7 @@ import { ArrowLeft, CheckCircle2, Minus, Plus, ShoppingBag, Trash2 } from 'lucid
 import { api } from '../../lib/api';
 import PublicShell from '../../components/PublicShell';
 
-type Product = { id: string; name: string; description: string; price: number; stock: number; category?: string; imageUrl?: string | null };
+type Product = { id: string; name: string; description: string; price: number; stock: number; category?: string; imageUrl?: string | null; deliveryCharge?: number };
 type CartItem = { product: Product; quantity: number };
 
 export default function Cart() {
@@ -19,6 +19,16 @@ export default function Cart() {
   const [address, setAddress] = useState('');
   const [busy, setBusy] = useState(false);
   const [order, setOrder] = useState<any>(null);
+
+  const [freeAbove, setFreeAbove] = useState(0);
+  // Delivery charge is set per product by the Trust; refresh it (and the free-delivery offer) so the cart always shows what will be billed.
+  useEffect(() => {
+    api<any>('/api/products/shipping').then((r) => setFreeAbove(Number(r?.freeAbove) || 0)).catch(() => undefined);
+    api<Product[]>('/api/products').then((fresh) => {
+      if (!Array.isArray(fresh)) return;
+      setCart((cur) => cur.map((i) => { const f = fresh.find((x) => x.id === i.product.id); return f ? { ...i, product: { ...i.product, price: f.price, stock: f.stock, deliveryCharge: f.deliveryCharge ?? 0 } } : i; }));
+    }).catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     try {
@@ -41,7 +51,7 @@ export default function Cart() {
   }
 
   const subtotal = useMemo(() => cart.reduce((sum, item) => sum + item.product.price * item.quantity, 0), [cart]);
-  const delivery = subtotal > 0 && subtotal < 1000 ? 80 : 0;
+  const delivery = subtotal > 0 && !(freeAbove > 0 && subtotal >= freeAbove) ? cart.reduce((n, i) => n + Math.max(0, Number(i.product.deliveryCharge) || 0) * i.quantity, 0) : 0;
   const total = subtotal + delivery;
 
   const cleanPhone = phone.replace(/\D/g, '').replace(/^(91|0)(?=\d{10}$)/, '');
@@ -174,7 +184,7 @@ export default function Cart() {
                 </div>
                 <div style={{ borderTop: '1px solid var(--line)', marginTop: 22, paddingTop: 18, display: 'grid', gap: 9 }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--muted)', fontSize: 13 }}><span>Subtotal</span><strong>₹{subtotal}</strong></div>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--muted)', fontSize: 13 }}><span>Delivery</span><strong>₹{delivery}</strong></div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--muted)', fontSize: 13 }}><span>Delivery</span><strong>{delivery === 0 ? 'Free' : `₹${delivery}`}</strong></div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 18, marginTop: 5 }}><strong>Total</strong><strong>₹{total}</strong></div>
                 </div>
                 <button type="button" className="btn btn-primary" style={{ width: '100%', marginTop: 20 }} disabled={busy} onClick={() => { const problem = detailsError(); if (problem) alert(problem); else setCheckout(true); }}>{busy ? 'Preparing…' : 'Continue to payment'}</button>

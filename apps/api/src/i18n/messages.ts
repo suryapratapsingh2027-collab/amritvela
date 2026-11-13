@@ -1,19 +1,21 @@
 /**
- * Every customer-facing sentence the bot sends, in four languages:
- *   en = English, hi = Hindi (Devanagari), hing = Hinglish (Hindi in Roman letters), pa = Punjabi (Gurmukhi).
+ * Every customer-facing sentence the bot sends, in five languages:
+ *   en = English, hi = Hindi (Devanagari), hing = Hinglish (Hindi in Roman letters), pa = Punjabi (Gurmukhi), mr = Marathi (messages-mr.ts).
  * {placeholders} must be identical in all five languages (checked by test/i18n.test.ts, together with WhatsApp's
  * length limits for buttons / list rows). Punjabi and Hindi texts should be reviewed by a native speaker before launch.
  */
 import { m, type L } from './helpers';
 import { M2 } from './messages-shop';
 import { M3 } from './messages-live';
+import { M4 } from './messages-r7';
+import { MR } from './messages-mr';
 
 const M1 = {
   /* ---------------------------------------------------------------- language picker (shown before a language is known) */
-  lang_welcome_body: m(`Namaste! 🙏 Welcome to Amrit Vela Trust.\nPlease select your preferred language.\n\nकृपया अपनी भाषा चुनें।\nਕਿਰਪਾ ਕਰਕੇ ਆਪਣੀ ਭਾਸ਼ਾ ਚੁਣੋ।`,
-    `Namaste! 🙏 Welcome to Amrit Vela Trust.\nPlease select your preferred language.\n\nकृपया अपनी भाषा चुनें।\nਕਿਰਪਾ ਕਰਕੇ ਆਪਣੀ ਭਾਸ਼ਾ ਚੁਣੋ।`,
-    `Namaste! 🙏 Welcome to Amrit Vela Trust.\nPlease select your preferred language.\n\nकृपया अपनी भाषा चुनें।\nਕਿਰਪਾ ਕਰਕੇ ਆਪਣੀ ਭਾਸ਼ਾ ਚੁਣੋ।`,
-    `Namaste! 🙏 Welcome to Amrit Vela Trust.\nPlease select your preferred language.\n\nकृपया अपनी भाषा चुनें।\nਕਿਰਪਾ ਕਰਕੇ ਆਪਣੀ ਭਾਸ਼ਾ ਚੁਣੋ।`,
+  lang_welcome_body: m(`Namaste! 🙏 Welcome to Amrit Vela Trust.\nPlease select your preferred language.\n\nकृपया अपनी भाषा चुनें।\nकृपया आपली भाषा निवडा।\nਕਿਰਪਾ ਕਰਕੇ ਆਪਣੀ ਭਾਸ਼ਾ ਚੁਣੋ।`,
+    `Namaste! 🙏 Welcome to Amrit Vela Trust.\nPlease select your preferred language.\n\nकृपया अपनी भाषा चुनें।\nकृपया आपली भाषा निवडा।\nਕਿਰਪਾ ਕਰਕੇ ਆਪਣੀ ਭਾਸ਼ਾ ਚੁਣੋ।`,
+    `Namaste! 🙏 Welcome to Amrit Vela Trust.\nPlease select your preferred language.\n\nकृपया अपनी भाषा चुनें।\nकृपया आपली भाषा निवडा।\nਕਿਰਪਾ ਕਰਕੇ ਆਪਣੀ ਭਾਸ਼ਾ ਚੁਣੋ।`,
+    `Namaste! 🙏 Welcome to Amrit Vela Trust.\nPlease select your preferred language.\n\nकृपया अपनी भाषा चुनें।\nकृपया आपली भाषा निवडा।\nਕਿਰਪਾ ਕਰਕੇ ਆਪਣੀ ਭਾਸ਼ਾ ਚੁਣੋ।`,
   ),
   lang_button: m('Select language', 'Select language', 'Select language', 'Select language'),
   lang_set: m('Language set to English ✅',
@@ -23,10 +25,10 @@ const M1 = {
   ),
 
   /* ---------------------------------------------------------------- main menu */
-  menu_body: m(`How can I help you today? Tap the button below and choose an option.`,
-    `मैं आपकी क्या सहायता कर सकता हूँ? नीचे दिए बटन को दबाकर कोई विकल्प चुनें।`,
-    `Main aapki kya madad kar sakta hoon? Neeche button dabakar ek option chunein.`,
-    `ਮੈਂ ਤੁਹਾਡੀ ਕੀ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ? ਹੇਠਾਂ ਦਿੱਤਾ ਬਟਨ ਦਬਾ ਕੇ ਕੋਈ ਵਿਕਲਪ ਚੁਣੋ।`,
+  menu_body: m(`🙏 DHAN GURU NANAK 🙏\n\nWelcome to Amrit Vela Trust. ❤️\n\nTell us, how can we serve you?\nPlease select an option:`,
+    `🙏 धन गुरु नानक 🙏\n\nअमृत वेला ट्रस्ट में आपका स्वागत है। ❤️\n\nबताइए, हम आपकी क्या सेवा कर सकते हैं?\nकृपया एक विकल्प चुनें:`,
+    `🙏 DHAN GURU NANAK 🙏\n\nAmrit Vela Trust mein aapka swagat hai. ❤️\n\nBatayein, hum aapki kya seva kar sakte hain?\nKripya ek option chunein:`,
+    `🙏 ਧੰਨ ਗੁਰੂ ਨਾਨਕ 🙏\n\nਅੰਮ੍ਰਿਤ ਵੇਲਾ ਟਰੱਸਟ ਵਿੱਚ ਤੁਹਾਡਾ ਸਵਾਗਤ ਹੈ। ❤️\n\nਦੱਸੋ, ਅਸੀਂ ਤੁਹਾਡੀ ਕੀ ਸੇਵਾ ਕਰ ਸਕਦੇ ਹਾਂ?\nਕਿਰਪਾ ਕਰਕੇ ਇੱਕ ਵਿਕਲਪ ਚੁਣੋ:`,
   ),
   menu_button: m('Open menu', 'मेनू खोलें', 'Menu kholein', 'ਮੀਨੂ ਖੋਲ੍ਹੋ'),
   sec_trust: m('The Trust', 'ट्रस्ट', 'Trust', 'ਟਰੱਸਟ'),
@@ -196,5 +198,7 @@ const M1 = {
   ),
 } as const satisfies Record<string, L>;
 
-export const M = { ...M1, ...M2, ...M3 } as const;
+const BASE = { ...M1, ...M2, ...M3, ...M4 } as const;
+/** Every message in en / hi / hing / pa / mr. A key without Marathi text fails test/i18n.test.ts (and falls back to Hindi at runtime). */
+export const M = Object.fromEntries(Object.entries(BASE).map(([k, v]) => [k, { ...v, mr: MR[k] ?? v.hi }])) as { [K in keyof typeof BASE]: L & { mr: string } };
 export type MessageKey = keyof typeof M;

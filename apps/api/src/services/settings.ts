@@ -1,13 +1,13 @@
 import { db } from '../db';
 import { env } from '../config';
 
-export type SocialLinks = { instagram?: string; facebook?: string; youtube?: string; whatsappGroup?: string };
-export const SOCIAL_FIELDS = ['instagram', 'facebook', 'youtube', 'whatsappGroup'] as const;
+export type SocialLinks = { instagram?: string; facebook?: string; youtube?: string; whatsappGroup?: string; whatsappChannel?: string };
+export const SOCIAL_FIELDS = ['instagram', 'facebook', 'youtube', 'whatsappGroup', 'whatsappChannel'] as const;
 export type SocialField = (typeof SOCIAL_FIELDS)[number];
 
-const KEY: Record<SocialField, string> = { instagram: 'social.instagram', facebook: 'social.facebook', youtube: 'social.youtube', whatsappGroup: 'social.whatsappGroup' };
+const KEY: Record<SocialField, string> = { instagram: 'social.instagram', facebook: 'social.facebook', youtube: 'social.youtube', whatsappGroup: 'social.whatsappGroup', whatsappChannel: 'social.whatsappChannel' };
 const ENV_FALLBACK: Record<SocialField, string | undefined> = {
-  instagram: env.TRUST_INSTAGRAM_URL, facebook: env.TRUST_FACEBOOK_URL, youtube: env.TRUST_YOUTUBE_URL, whatsappGroup: env.TRUST_WHATSAPP_COMMUNITY_URL,
+  instagram: env.TRUST_INSTAGRAM_URL, facebook: env.TRUST_FACEBOOK_URL, youtube: env.TRUST_YOUTUBE_URL, whatsappGroup: env.TRUST_WHATSAPP_COMMUNITY_URL, whatsappChannel: undefined,
 };
 
 /** Hosts each link must point to, so a wrong paste (e.g. a Facebook link in the Instagram box) is caught. */
@@ -16,8 +16,9 @@ const HOSTS: Record<SocialField, RegExp> = {
   facebook: /(^|\.)(facebook\.com|fb\.com|fb\.me)$/i,
   youtube: /(^|\.)(youtube\.com|youtu\.be)$/i,
   whatsappGroup: /(^|\.)(chat\.whatsapp\.com|whatsapp\.com|wa\.me)$/i,
+  whatsappChannel: /(^|\.)(whatsapp\.com|wa\.me)$/i,
 };
-export const SOCIAL_LABEL: Record<SocialField, string> = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', whatsappGroup: 'WhatsApp group' };
+export const SOCIAL_LABEL: Record<SocialField, string> = { instagram: 'Instagram', facebook: 'Facebook', youtube: 'YouTube', whatsappGroup: 'WhatsApp group', whatsappChannel: 'WhatsApp channel' };
 
 /** Returns an error sentence, or null when the link is acceptable. */
 export function validateSocialUrl(field: SocialField, value: string): string | null {

@@ -8,9 +8,19 @@ import { normalizePhone } from '../utils/phone';
 import { isAcceptingDonations } from '../services/campaigns';
 import { buildDonationReceipt } from '../services/receipt-doc';
 import { deliverDonationReceipt, markDonationPaid } from '../services/payments';
+import { paymentAccount, accountForDonation } from '../services/trust-accounts';
 
 
 const r = Router();
+
+// Trusts a donor can give to (website donate page): online ones accept a payment, QR-only ones show their QR / UPI id.
+r.get('/trusts', async (_req, res) => {
+  const rows = await db.trust.findMany({ where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] });
+  res.json(rows.map((t) => ({
+    slug: t.slug, name: t.name, online: paymentAccount(t as any).link, qrImageUrl: t.offerQr || t.accountMode === 'QR_ONLY' ? t.qrImageUrl : null,
+    upiId: t.offerQr || t.accountMode === 'QR_ONLY' ? t.upiId : null, presets: Array.isArray(t.presets) ? t.presets : [], contactPhone: t.contactPhone,
+  })));
+});
 
 // Creates a Razorpay Payment Link and sends it to the donor's WhatsApp.
 r.post('/whatsapp-link', async (req, res) => {
@@ -18,7 +28,9 @@ r.post('/whatsapp-link', async (req, res) => {
     const { phone, name, email, amount } = req.body || {};
     const normalized = normalizePhone(phone);
     if (!normalized) return res.status(400).json({ error: 'Valid 10-digit mobile number required' });
-    const result = await createAndSendDonationLink({ phone: normalized, name, email, amount: Number(amount) });
+    const trust = req.body?.trustSlug ? await db.trust.findFirst({ where: { slug: String(req.body.trustSlug), active: true } }) : null;
+    if (req.body?.trustSlug && !trust) return res.status(400).json({ error: 'This trust is not accepting donations right now.' });
+    const result = await createAndSendDonationLink({ phone: normalized, name, email, amount: Number(amount), trustId: trust?.id ?? null });
     return res.status(201).json({ success: true, ...result });
   } catch (error: any) {
     console.error('[DONATION PAYMENT LINK ERROR]', error?.message || error);
@@ -43,10 +55,22 @@ r.post('/', async (req, res) => {
       if (!campaign || !isAcceptingDonations(campaign)) return res.status(400).json({ error: 'This campaign is not accepting donations right now.' });
       campaignId = campaign.id;
     }
-    const donation = await db.donation.create({ data: { reference, userId: user.id, amount: Math.round(value), campaignId } });
-    const payment = await createPayment(Math.round(value), reference);
+    // Optional: a specific trust (its own Razorpay account), or the trust linked to the campaign.
+    let trust: any = null;
+    const trustSlug = req.body?.trustSlug ? String(req.body.trustSlug) : null;
+    if (trustSlug) {
+      trust = await db.trust.findFirst({ where: { slug: trustSlug, active: true } });
+      if (!trust) return res.status(400).json({ error: 'This trust is not accepting donations right now.' });
+    } else if (campaignId) {
+      const linked = await db.campaign.findUnique({ where: { id: campaignId }, select: { trustId: true } });
+      if (linked?.trustId) trust = await db.trust.findFirst({ where: { id: linked.trustId, active: true } });
+    }
+    const pay = paymentAccount(trust);
+    if (!pay.link) return res.status(400).json({ error: `${trust?.name || 'This trust'} accepts donations by QR / UPI only. Please use the QR code shown for it, or donate on WhatsApp.` });
+    const donation = await db.donation.create({ data: { reference, userId: user.id, amount: Math.round(value), campaignId, trustId: trust?.id ?? null } });
+    const payment = await createPayment(Math.round(value), reference, pay.account);
     await db.donation.update({ where: { id: donation.id }, data: { razorpayOrderId: String((payment as any).id) } });
-    res.status(201).json({ donationId: donation.id, reference, payment, keyId: process.env.RAZORPAY_KEY_ID || null });
+    res.status(201).json({ donationId: donation.id, reference, payment, keyId: pay.account?.keyId ?? process.env.RAZORPAY_KEY_ID ?? null });
   } catch (e: any) { res.status(500).json({ error: e.message || 'Donation failed' }); }
 });
 
@@ -55,7 +79,7 @@ r.post('/:id/verify', async (req, res) => {
     const { razorpayPaymentId, razorpaySignature } = req.body || {};
     const donation = await db.donation.findUnique({ where: { id: String(req.params.id) } });
     if (!donation) return res.status(404).json({ error: 'Donation not found' });
-    if (!donation.razorpayOrderId || !verifyCheckoutSignature(String(donation.razorpayOrderId), String(razorpayPaymentId), String(razorpaySignature))) {
+    if (!donation.razorpayOrderId || !verifyCheckoutSignature(String(donation.razorpayOrderId), String(razorpayPaymentId), String(razorpaySignature), await accountForDonation(donation))) {
       return res.status(400).json({ error: 'Invalid payment signature' });
     }
     await markDonationPaid(donation.id, String(razorpayPaymentId));

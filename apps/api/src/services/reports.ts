@@ -53,6 +53,11 @@ export async function donationDashboard(now = new Date()) {
   const years = await series('YYYY', new Date(0));
   const yearly = [...years.values()].sort((a, b) => a.key.localeCompare(b.key));
 
+  // Money collected per trust (verified payments only), so each trust's account can be reconciled separately.
+  const byTrustRaw = await db.donation.groupBy({ by: ['trustId'], where: { paymentStatus: 'PAID' }, _sum: { amount: true }, _count: { _all: true } });
+  const trustRows = await db.trust.findMany({ select: { id: true, name: true } });
+  const byTrust = byTrustRaw.map((r) => ({ id: r.trustId, name: r.trustId ? trustRows.find((x) => x.id === r.trustId)?.name ?? 'Removed trust' : 'Amrit Vela Trust (main)', total: r._sum.amount ?? 0, count: r._count._all })).sort((a, b) => b.total - a.total);
+
   const campaignIds = byCampaignRaw.map((r) => r.campaignId!).filter(Boolean);
   const campaigns = campaignIds.length ? await db.campaign.findMany({ where: { id: { in: campaignIds } }, select: { id: true, title: true, targetAmount: true } }) : [];
   const topCampaigns = byCampaignRaw.map((r) => { const c = campaigns.find((x) => x.id === r.campaignId); return { id: r.campaignId, title: c?.title ?? 'Campaign', target: c?.targetAmount ?? 0, raised: r._sum.amount ?? 0, donations: r._count._all }; });
@@ -65,7 +70,7 @@ export async function donationDashboard(now = new Date()) {
       today, month, prevMonth, year, financialYear: fy, monthGrowthPercent: growth,
       pending: { total: pending._sum.amount ?? 0, count: pending._count._all }, failed: failed._count._all,
     },
-    daily, monthly, yearly, topCampaigns,
+    daily, monthly, yearly, topCampaigns, byTrust,
     recent: recent.map((d) => ({ id: d.id, reference: d.reference, receiptNumber: d.receiptNumber, amount: d.amount, status: d.paymentStatus, createdAt: d.createdAt, paidAt: d.paidAt, donor: d.user?.name || d.user?.phone, userId: d.userId, campaign: d.campaign?.title ?? null })),
   };
 }
@@ -79,19 +84,20 @@ export const csvCell = (v: unknown): string => {
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 };
 
-export async function donationsCsv(opts: { from?: string; to?: string; status?: string; campaignId?: string }) {
+export async function donationsCsv(opts: { from?: string; to?: string; status?: string; campaignId?: string; trustId?: string }) {
   const where: Prisma.DonationWhereInput = {};
   if (opts.status && ['PAID', 'PENDING', 'FAILED'].includes(opts.status)) where.paymentStatus = opts.status as any;
   if (opts.campaignId) where.campaignId = opts.campaignId;
+  if (opts.trustId) where.trustId = opts.trustId;
   const range: { gte?: Date; lt?: Date } = {};
   if (opts.from) range.gte = istStartOfDay(opts.from);
   if (opts.to) range.lt = istStartOfDay(addDays(opts.to, 1));
   if (range.gte || range.lt) where.createdAt = range;
-  const rows = await db.donation.findMany({ where, orderBy: { createdAt: 'desc' }, take: 20000, include: { user: true, campaign: { select: { title: true } } } });
-  const header = ['Receipt No', 'Date (IST)', 'Reference', 'Donor name', 'Mobile', 'Email', 'Amount (INR)', 'Status', 'Payment ID', 'Campaign'];
+  const rows = await db.donation.findMany({ where, orderBy: { createdAt: 'desc' }, take: 20000, include: { user: true, campaign: { select: { title: true } }, trust: { select: { name: true } } } });
+  const header = ['Receipt No', 'Date (IST)', 'Reference', 'Donor name', 'Mobile', 'Email', 'Amount (INR)', 'Status', 'Payment ID', 'Campaign', 'Trust'];
   const fmt = (d: Date | null) => (d ? `${istParts(d).ymd} ${istParts(d).hm}` : '');
   const lines = [header.join(',')];
-  for (const r of rows) lines.push([r.receiptNumber, fmt(r.paidAt ?? r.createdAt), r.reference, r.user.name, r.user.phone, r.user.email, r.amount, r.paymentStatus, r.razorpayPaymentId, r.campaign?.title].map(csvCell).join(','));
+  for (const r of rows) lines.push([r.receiptNumber, fmt(r.paidAt ?? r.createdAt), r.reference, r.user.name, r.user.phone, r.user.email, r.amount, r.paymentStatus, r.razorpayPaymentId, r.campaign?.title, r.trust?.name ?? 'Amrit Vela Trust (main)'].map(csvCell).join(','));
   const paid = rows.filter((r) => r.paymentStatus === 'PAID');
   return { csv: `\uFEFF${lines.join('\r\n')}\r\n`, count: rows.length, paidTotal: paid.reduce((n, r) => n + r.amount, 0), paidCount: paid.length };
 }

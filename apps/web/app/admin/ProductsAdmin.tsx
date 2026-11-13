@@ -1,17 +1,17 @@
 'use client';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Eye, EyeOff, ImageOff, Pencil, Plus, X } from 'lucide-react';
 import { api } from '../../lib/api';
 import ImageUploader from '../../components/ImageUploader';
 
 export type Product = {
-  id: string; name: string; description: string; price: number; stock: number; category?: string | null; imageUrl?: string | null; active: boolean;
+  id: string; name: string; description: string; price: number; stock: number; category?: string | null; imageUrl?: string | null; active: boolean; deliveryCharge?: number;
 };
 
-type FormState = { name: string; price: string; stock: string; category: string; description: string; imageUrl: string | null; active: boolean };
-const empty: FormState = { name: '', price: '', stock: '', category: '', description: '', imageUrl: null, active: true };
+type FormState = { name: string; price: string; stock: string; deliveryCharge: string; category: string; description: string; imageUrl: string | null; active: boolean };
+const empty: FormState = { name: '', price: '', stock: '', deliveryCharge: '0', category: '', description: '', imageUrl: null, active: true };
 const fromProduct = (p: Product): FormState => ({
-  name: p.name, price: String(p.price), stock: String(p.stock), category: p.category || '',
+  name: p.name, price: String(p.price), stock: String(p.stock), deliveryCharge: String(p.deliveryCharge ?? 0), category: p.category || '',
   description: /^add product description$/i.test(p.description) ? '' : p.description, imageUrl: p.imageUrl || null, active: p.active,
 });
 
@@ -29,6 +29,7 @@ function validate(f: FormState): string | null {
   if (f.name.trim().length < 2) return 'Enter the product name (at least 2 characters).';
   if (!/^\d+$/.test(f.price.trim()) || Number(f.price) < 1) return 'Enter the price in whole rupees, for example 100.';
   if (!/^\d+$/.test(f.stock.trim())) return 'Enter the stock as a whole number, for example 25 (0 if out of stock).';
+  if (!/^\d+$/.test(f.deliveryCharge.trim())) return 'Enter the delivery charge in whole rupees. Enter 0 for free delivery.';
   return null;
 }
 
@@ -44,7 +45,7 @@ function ProductForm({ product, onClose, onSaved }: { product?: Product; onClose
     if (problem) { setError(problem); return; }
     setBusy(true); setError('');
     try {
-      const body = JSON.stringify({ name: f.name.trim(), price: Number(f.price), stock: Number(f.stock), category: f.category.trim(), description: f.description.trim(), imageUrl: f.imageUrl || '', active: f.active });
+      const body = JSON.stringify({ name: f.name.trim(), price: Number(f.price), stock: Number(f.stock), deliveryCharge: Number(f.deliveryCharge), category: f.category.trim(), description: f.description.trim(), imageUrl: f.imageUrl || '', active: f.active });
       if (product) await api(`/api/admin/products/${product.id}`, { method: 'PATCH', body });
       else await api('/api/admin/products', { method: 'POST', body });
       onSaved();
@@ -70,6 +71,9 @@ function ProductForm({ product, onClose, onSaved }: { product?: Product; onClose
         </Field>
         <Field label="Stock (pieces available)" required hint="Enter 0 to mark the product “out of stock”; it can then not be ordered on WhatsApp. Customers never see the stock number.">
           <input className="input" inputMode="numeric" value={f.stock} onChange={(e) => set('stock', e.target.value.replace(/[^\d]/g, ''))} placeholder="e.g. 25" />
+        </Field>
+        <Field label="Delivery charge (₹ per piece)" required hint="Enter 0 for FREE delivery on this product. For example 80 means ₹80 is added for every piece the customer orders (2 pieces = ₹160). The customer sees it before paying.">
+          <input className="input" inputMode="numeric" value={f.deliveryCharge} onChange={(e) => set('deliveryCharge', e.target.value.replace(/[^\d]/g, ''))} placeholder="0 = free delivery" />
         </Field>
         <Field label="Category (optional)" hint="For example: Pooja, Mala, Apparel.">
           <input className="input" value={f.category} maxLength={40} onChange={(e) => set('category', e.target.value)} placeholder="e.g. Pooja" />
@@ -99,6 +103,33 @@ function ProductForm({ product, onClose, onSaved }: { product?: Product; onClose
   );
 }
 
+/** Store-wide offer: orders whose product total reaches this amount ship free (0 = no offer). */
+function ShippingOffer() {
+  const [value, setValue] = useState('');
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { api<{ freeAbove: number }>('/api/admin/settings/shipping').then((r) => setValue(String(r?.freeAbove ?? 0))).catch(() => undefined); }, []);
+  async function save(e: React.FormEvent) {
+    e.preventDefault(); setMsg(null);
+    if (!/^\d+$/.test(value.trim())) return setMsg({ ok: false, text: 'Enter whole rupees, for example 1000. Enter 0 for no offer.' });
+    setBusy(true);
+    try { const r = await api<{ freeAbove: number }>('/api/admin/settings/shipping', { method: 'PUT', body: JSON.stringify({ freeAbove: Number(value) }) }); setMsg({ ok: true, text: r!.freeAbove ? `Saved. Orders of ₹${r!.freeAbove.toLocaleString('en-IN')} or more now get free delivery.` : 'Saved. There is no free-delivery offer; each product’s own charge applies.' }); }
+    catch (err: any) { setMsg({ ok: false, text: err.message }); } finally { setBusy(false); }
+  }
+  return (
+    <form onSubmit={save} className="mb-5 rounded-2xl border bg-[#f7f8f4] p-4">
+      <div className="text-sm font-bold">Free-delivery offer for the whole store</div>
+      <p className="mt-1 text-xs text-neutral-500">When the product total of an order reaches this amount, delivery is free whatever each product’s own charge is. Enter 0 to switch the offer off.</p>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <span className="text-sm">Free delivery on orders of ₹</span>
+        <input className="input" style={{ width: 130 }} inputMode="numeric" value={value} onChange={(e) => setValue(e.target.value.replace(/[^\d]/g, ''))} aria-label="Free delivery above" />
+        <button className="btn btn-dark" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+      </div>
+      {msg && <p role={msg.ok ? 'status' : 'alert'} className={`mt-3 rounded-xl p-3 text-sm ${msg.ok ? 'bg-[#eef5ef] text-[#1d4d36]' : 'bg-red-50 text-red-700'}`}>{msg.text}</p>}
+    </form>
+  );
+}
+
 export default function ProductsAdmin({ products, reload }: { products: Product[]; reload: () => Promise<void> | void }) {
   const [editing, setEditing] = useState<Product | 'new' | null>(null);
   const [notice, setNotice] = useState('');
@@ -118,6 +149,7 @@ export default function ProductsAdmin({ products, reload }: { products: Product[
         <div><h2 className="text-xl font-bold">Product catalogue</h2><p className="text-sm text-neutral-500">{products.length} products</p></div>
         <button onClick={() => { setNotice(''); setEditing('new'); }} className="btn btn-dark"><Plus size={16} /> New product</button>
       </div>
+      <ShippingOffer />
       {notice && <p role="status" className="mb-4 rounded-xl bg-[#eef5ef] p-3 text-sm text-[#1d4d36]">{notice}</p>}
       {!products.length && <p className="py-10 text-center text-sm text-neutral-400">No products yet. Click “New product” to add your first one.</p>}
       <div className="space-y-3">
@@ -128,7 +160,7 @@ export default function ProductsAdmin({ products, reload }: { products: Product[
             </div>
             <div style={{ flex: '1 1 220px', minWidth: 0 }}>
               <div className="font-bold">{p.name}</div>
-              <div className="mt-1 text-sm text-neutral-500">₹{p.price.toLocaleString('en-IN')}{p.category ? ` · ${p.category}` : ''}</div>
+              <div className="mt-1 text-sm text-neutral-500">₹{p.price.toLocaleString('en-IN')}{p.category ? ` · ${p.category}` : ''} · {p.deliveryCharge ? `Delivery ₹${p.deliveryCharge.toLocaleString('en-IN')}/piece` : 'Free delivery'}</div>
               <div className="mt-2 flex flex-wrap gap-2 text-xs font-bold">
                 <span className="rounded-full px-3 py-1" style={{ background: p.stock === 0 ? '#fde8e8' : p.stock < 5 ? '#fff3d6' : '#e8f3ec', color: p.stock === 0 ? '#b42318' : p.stock < 5 ? '#8a5a00' : '#1d5b3d' }}>{p.stock === 0 ? 'Out of stock' : `Stock: ${p.stock}`}</span>
                 {!p.active && <span className="rounded-full bg-neutral-200 px-3 py-1">Hidden</span>}

@@ -1,6 +1,7 @@
 import { db } from '../db';
 import { env } from '../config';
 import { normalizeLang, t } from '../i18n';
+import { accountForDonation } from './trust-accounts';
 import { fetchProviderPaymentState, type ProviderPaymentState } from '../integrations/razorpay';
 import { sendWhatsAppPdf, sendWhatsAppDocument, sendWhatsAppText } from '../integrations/whatsapp';
 import { buildDonationReceipt } from './receipt-doc';
@@ -79,7 +80,7 @@ export async function reconcileDonation(donationId: string): Promise<ReconcileRe
   if (d.paymentStatus === 'PAID') return { kind: 'donation', status: 'PAID', justPaid: false, unverified: false };
   if (!d.razorpayOrderId) return { kind: 'donation', status: 'PENDING', justPaid: false, unverified: true };
 
-  const provider = await fetchProviderPaymentState(d.razorpayOrderId);
+  const provider = await fetchProviderPaymentState(d.razorpayOrderId, await accountForDonation(d));
   if (provider.state === 'paid') {
     if (!amountOk(provider, d.amount, d.currency)) {
       console.error(`[RECONCILE] Donation ${d.reference}: Razorpay paid ${provider.amountPaidPaise} paise but expected ${d.amount * 100}. NOT marking paid.`);

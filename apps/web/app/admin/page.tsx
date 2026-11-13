@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { LucideIcon } from 'lucide-react';
 import {
-  LayoutDashboard, Package, HeartHandshake, Users, MessageCircle, BookOpen, LogOut, Truck, Images, CalendarDays, UserCog, Landmark, FileText, Share2, Megaphone, Radio, Contact,
+  LayoutDashboard, Package, HeartHandshake, Users, MessageCircle, BookOpen, LogOut, Truck, Images, CalendarDays, UserCog, Landmark, FileText, Share2, Megaphone, Radio, Contact, BedDouble,
 } from 'lucide-react';
 import './admin.css';
 import { api, ApiError } from '../../lib/api';
@@ -19,6 +19,7 @@ import DonationsAdmin from './DonationsAdmin';
 import DonorsAdmin from './DonorsAdmin';
 import CampaignsAdmin from './CampaignsAdmin';
 import LiveAdmin from './LiveAdmin';
+import RoomsAdmin from './RoomsAdmin';
 import { GalleryAdmin, KnowledgeAdmin, PosterAdmin } from './ContentAdmin';
 
 type NavItem = [key: string, label: string, Icon: LucideIcon];
@@ -27,8 +28,8 @@ const groups: { title: string; items: NavItem[] }[] = [
   { title: 'Overview', items: [['overview', 'Dashboard', LayoutDashboard]] },
   { title: 'Donations', items: [['donations', 'Donations', HeartHandshake], ['donors', 'Donors', Contact], ['campaigns', 'Campaigns', Megaphone], ['live', 'Live Kirtan', Radio]] },
   { title: 'Shop', items: [['products', 'Products', Package], ['orders', 'Orders', Truck], ['customers', 'Customers', Users]] },
-  { title: 'WhatsApp & content', items: [['conversations', 'Support', MessageCircle], ['trusts', 'Trusts', Landmark], ['documents', 'Documents (PDF)', FileText], ['social', 'Social Links', Share2], ['knowledge', 'AI Knowledge', BookOpen], ['gallery', 'Gallery', Images], ['posters', 'Event Posters', CalendarDays]] },
-  { title: 'Settings', items: [['account', 'Account', UserCog]] },
+  { title: 'WhatsApp & content', items: [['conversations', 'Support', MessageCircle], ['rooms', 'Room Bookings', BedDouble], ['trusts', 'Trusts', Landmark], ['documents', 'Documents (PDF)', FileText], ['social', 'Social Links', Share2], ['knowledge', 'AI Knowledge', BookOpen], ['gallery', 'Gallery', Images], ['posters', 'Event Posters', CalendarDays]] },
+  { title: 'Settings', items: [['account', 'My Profile & Account', UserCog]] },
 ];
 const nav: NavItem[] = groups.flatMap((g) => g.items);
 
@@ -46,6 +47,9 @@ export default function Admin() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [shipping, setShipping] = useState('');
+  const [me, setMe] = useState<{ name: string | null; email: string; avatarUrl: string | null } | null>(null);
+  const [pendingRooms, setPendingRooms] = useState(0);
+  const loadRoomCount = () => api<any[]>('/api/admin/room-bookings').then((r) => setPendingRooms((r ?? []).filter((b) => b.status === 'PENDING').length)).catch(() => undefined);
 
   async function load() {
     try {
@@ -60,7 +64,7 @@ export default function Admin() {
     } finally { setLoading(false); }
   }
 
-  useEffect(() => { if (!localStorage.getItem('trust_token')) router.replace('/login'); else load(); }, []);
+  useEffect(() => { if (!localStorage.getItem('trust_token')) router.replace('/login'); else { load(); loadRoomCount(); api<any>('/api/auth/me').then((u) => setMe(u ?? null)).catch(() => undefined); } }, []);
 
   async function ship(id: string) {
     if (shipping) return;
@@ -76,20 +80,25 @@ export default function Admin() {
   return (
     <main className="adm">
       <aside className="adm-side" aria-label="Admin navigation">
-        <div className="adm-brand"><div className="adm-logo" aria-hidden>अ</div><div><b>AMRIT VELA</b><small>TRUST</small></div></div>
+        <div className="adm-brand"><img className="adm-logo" src="/icon.png" alt="" width={42} height={42} style={{ objectFit: 'cover', background: 'none' }} /><div><b>AMRIT VELA</b><small>TRUST</small></div></div>
         <nav className="adm-nav">
           {groups.map((g) => (
             <div key={g.title}>
               <div className="adm-group">{g.title}</div>
               {g.items.map(([key, label, Icon]) => (
                 <button key={key} className="adm-link" aria-current={tab === key ? 'page' : undefined} onClick={() => setTab(key)}>
-                  <Icon size={17} />{label}{key === 'donations' && pending > 0 && <span className="count">{pending}</span>}
+                  <Icon size={17} />{label}{key === 'donations' && pending > 0 && <span className="count">{pending}</span>}{key === 'rooms' && pendingRooms > 0 && <span className="count">{pendingRooms}</span>}
                 </button>
               ))}
             </div>
           ))}
         </nav>
-        <div className="adm-foot"><button className="adm-link" onClick={() => { localStorage.removeItem('trust_token'); router.push('/login'); }}><LogOut size={17} /> Sign out</button></div>
+        <div className="adm-foot">
+          <button className="adm-link" onClick={() => setTab('account')} aria-label="My profile" style={{ marginBottom: 6, height: 'auto', paddingTop: 8, paddingBottom: 8 }}>
+            {me?.avatarUrl ? <img src={me.avatarUrl} alt="" style={{ width: 30, height: 30, borderRadius: 999, objectFit: 'cover', flexShrink: 0 }} /> : <span aria-hidden style={{ width: 30, height: 30, borderRadius: 999, background: 'rgba(255,255,255,.14)', display: 'grid', placeItems: 'center', fontWeight: 800, fontSize: 13, flexShrink: 0 }}>{(me?.name || me?.email || 'A').trim().charAt(0).toUpperCase()}</span>}
+            <span style={{ minWidth: 0, textAlign: 'left' }}><b style={{ display: 'block', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{me?.name || 'Administrator'}</b><small style={{ display: 'block', opacity: .65, fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis' }}>{me?.email}</small></span>
+          </button>
+          <button className="adm-link" onClick={() => { localStorage.removeItem('trust_token'); router.push('/login'); }}><LogOut size={17} /> Sign out</button></div>
       </aside>
 
       <section className="adm-main">
@@ -139,7 +148,7 @@ export default function Admin() {
             <table className="w-full text-left text-sm">
               <thead className="border-b bg-neutral-50"><tr><th className="p-4">Customer</th><th>Phone</th><th>Language</th><th>Orders</th><th>Donations</th><th>Conversations</th></tr></thead>
               <tbody>{customers.map((c) => (
-                <tr className="border-b last:border-0" key={c.id}><td className="p-4 font-semibold">{c.name || '—'}</td><td>{c.phone}</td><td>{({ en: 'English', hi: 'Hindi', hing: 'Hinglish', pa: 'Punjabi' } as any)[c.language] || '—'}</td><td>{c._count.orders}</td><td>{c._count.donations}</td><td>{c._count.conversations}</td></tr>
+                <tr className="border-b last:border-0" key={c.id}><td className="p-4 font-semibold">{c.name || '—'}</td><td>{c.phone}</td><td>{({ en: 'English', hi: 'Hindi', hing: 'Hinglish', pa: 'Punjabi', mr: 'Marathi' } as any)[c.language] || '—'}</td><td>{c._count.orders}</td><td>{c._count.donations}</td><td>{c._count.conversations}</td></tr>
               ))}</tbody>
             </table>
           </div>}
@@ -151,7 +160,8 @@ export default function Admin() {
           {tab === 'knowledge' && <KnowledgeAdmin docs={knowledge} reload={load} />}
           {tab === 'gallery' && <GalleryAdmin images={gallery} reload={load} />}
           {tab === 'posters' && <PosterAdmin posters={posters} reload={load} />}
-          {tab === 'account' && <AccountSettings />}
+          {tab === 'rooms' && <RoomsAdmin onChange={loadRoomCount} />}
+          {tab === 'account' && <AccountSettings onProfile={(m: any) => setMe((x) => ({ ...(x as any), ...m }))} />}
         </div>
       </section>
     </main>

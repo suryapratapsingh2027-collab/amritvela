@@ -24,11 +24,21 @@ async function bootstrap(){
   const numbered = await backfillReceiptNumbers();
   if (numbered) console.log(`[BOOTSTRAP] Receipt numbers assigned to ${numbered} older donations`);
 
-  // A ready-to-fill draft for the second trust. It stays hidden from customers until the admin writes the information
-  // and (optionally) uploads the UPI QR code in Admin > Trusts, then switches it on.
-  if ((await db.trust.count()) === 0) {
-    await db.trust.create({ data: { slug: 'nanak-roti-trust', name: 'Nanak Roti Trust', active: false, sortOrder: 0, infoEn: '' } });
-    console.log('[BOOTSTRAP] Draft "Nanak Roti Trust" created (hidden until configured in the admin panel)');
+  // The trusts a donor can choose on WhatsApp / the website (from the client's flow). Created once; afterwards the admin owns them
+  // (Admin > Trusts: payment account, QR, quick amounts, on/off). They use the main Razorpay account until the admin gives a trust its own keys.
+  if (!(await db.setting.findUnique({ where: { key: 'seed.trusts.r7' } }))) {
+    const seeds = [
+      { slug: 'nanak-roti-trust', name: 'Nanak Roti Trust', sortOrder: 1, presets: [{ label: 'One time langar', amount: 13000 }] },
+      { slug: 'helping-bezubaan-trust', name: 'Helping Bezubaan', sortOrder: 2, presets: [{ label: 'One day meal', amount: 5100 }] },
+      { slug: 'amritsar-dharamshala', name: 'Amritsar Dharamshala', sortOrder: 3, presets: [] as { label: string; amount: number }[] },
+      { slug: 'general-donation', name: 'General Donation', sortOrder: 99, presets: [] as { label: string; amount: number }[] },
+    ];
+    for (const x of seeds) {
+      if (await db.trust.findUnique({ where: { slug: x.slug } })) continue;
+      await db.trust.create({ data: { slug: x.slug, name: x.name, active: true, sortOrder: x.sortOrder, infoEn: '', accountMode: 'DEFAULT', offerQr: true, presets: x.presets } });
+    }
+    await db.setting.create({ data: { key: 'seed.trusts.r7', value: new Date().toISOString() } });
+    console.log('[BOOTSTRAP] Donation trusts created (Nanak Roti, Helping Bezubaan, Amritsar Dharamshala, General Donation)');
   }
 
   // Keep the verified Trust knowledge loaded in production. Hand-edited documents are never overwritten.

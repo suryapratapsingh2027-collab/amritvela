@@ -8,6 +8,7 @@ import AccountSettings from '../app/admin/AccountSettings';
 import DocumentsAdmin from '../app/admin/DocumentsAdmin';
 import TrustsAdmin from '../app/admin/TrustsAdmin';
 import SocialAdmin from '../app/admin/SocialAdmin';
+import RoomsAdmin from '../app/admin/RoomsAdmin';
 import Assistant from '../components/Assistant';
 import { api, ApiError } from '../lib/api';
 
@@ -165,7 +166,7 @@ describe('AccountSettings', () => {
     routes['GET /api/auth/me'] = () => ({ json: { email: 'owner@trust.org' } });
     routes['POST /api/auth/change-password'] = () => ({ json: { message: 'Your password has been changed.', token: 'NEW.TOKEN' } });
     render(<AccountSettings />);
-    expect(await screen.findByText('owner@trust.org')).toBeInTheDocument();
+    expect((await screen.findAllByText('owner@trust.org')).length).toBeGreaterThan(0);
     const pw = screen.getAllByPlaceholderText('Current password')[0];
     await userEvent.type(pw, 'Old-password-123');
     await userEvent.type(screen.getByPlaceholderText('New password'), 'short');
@@ -320,7 +321,7 @@ describe('DocumentsAdmin (PDF uploads for the WhatsApp Downloads list)', () => {
 });
 
 describe('TrustsAdmin (Nanak Roti Trust + donation QR)', () => {
-  const draft = { id: 't1', slug: 'nanak-roti-trust', name: 'Nanak Roti Trust', active: false, sortOrder: 0, infoEn: '', infoHi: null, infoHing: null, infoPa: null, qrImageUrl: null, upiId: null, contactPhone: null, contactEmail: null };
+  const draft = { id: 't1', slug: 'nanak-roti-trust', name: 'Nanak Roti Trust', active: false, sortOrder: 0, infoEn: '', infoHi: null, infoHing: null, infoPa: null, qrImageUrl: null, upiId: null, contactPhone: null, contactEmail: null, accountMode: 'DEFAULT', razorpayKeyId: null, hasKeySecret: false, hasWebhookSecret: false, offerQr: true, presets: [] };
 
   it('shows the hidden draft with a "No QR code" warning', async () => {
     routes['GET /api/admin/trusts'] = () => ({ json: [draft] });
@@ -329,22 +330,27 @@ describe('TrustsAdmin (Nanak Roti Trust + donation QR)', () => {
     expect(screen.getByText('Hidden')).toBeInTheDocument(); expect(screen.getByText('No QR code')).toBeInTheDocument(); expect(screen.getByText('No information written yet.')).toBeInTheDocument();
   });
 
-  it('will not make a trust visible without English information; then saves everything with the 4 languages and UPI id', async () => {
+  it('rejects a too-short English text; then saves everything with the 4 languages, UPI id, account mode and a quick amount', async () => {
     routes['GET /api/admin/trusts'] = () => ({ json: [draft] });
     routes['PATCH /api/admin/trusts/t1'] = () => ({ json: {} });
     render(<TrustsAdmin />);
     await userEvent.click(await screen.findByRole('button', { name: /edit/i }));
     expect(screen.getByText(/Donation QR code \(PhonePe \/ any UPI app\)/)).toBeInTheDocument();
     await userEvent.click(screen.getByLabelText(/Visible to customers/));
+    await userEvent.type(screen.getByLabelText(/Information \(English\)/), 'short');
     await userEvent.click(screen.getByRole('button', { name: /save changes/i }));
-    expect(screen.getByRole('alert')).toHaveTextContent(/information in English/i);
+    expect(screen.getByRole('alert')).toHaveTextContent(/at least 10 characters/i);
     expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+    await userEvent.clear(screen.getByLabelText(/Information \(English\)/));
     await userEvent.type(screen.getByLabelText(/Information \(English\)/), 'Free roti seva every day.');
+    await userEvent.click(screen.getByRole('button', { name: /add quick amount/i }));
+    await userEvent.type(screen.getByLabelText('Quick amount name'), 'One time langar');
+    await userEvent.type(screen.getByLabelText('Quick amount'), '13000');
     await userEvent.type(screen.getByLabelText(/Information \(Hindi\)/), 'रोज़ मुफ़्त रोटी सेवा।');
-    await userEvent.type(screen.getByLabelText(/UPI ID/), 'nanak@oksbi');
+    await userEvent.type(screen.getByLabelText(/UPI ID \(optional\)/), 'nanak@oksbi');
     await userEvent.click(screen.getByRole('button', { name: /save changes/i }));
     await waitFor(() => expect(calls.some((c) => c.method === 'PATCH')).toBe(true));
-    expect(calls.find((c) => c.method === 'PATCH')!.body).toMatchObject({ name: 'Nanak Roti Trust', active: true, infoEn: 'Free roti seva every day.', infoHi: 'रोज़ मुफ़्त रोटी सेवा।', upiId: 'nanak@oksbi', qrImageUrl: '' });
+    expect(calls.find((c) => c.method === 'PATCH')!.body).toMatchObject({ accountMode: 'DEFAULT', presets: [{ label: 'One time langar', amount: 13000 }], name: 'Nanak Roti Trust', active: true, infoEn: 'Free roti seva every day.', infoHi: 'रोज़ मुफ़्त रोटी सेवा।', upiId: 'nanak@oksbi', qrImageUrl: '' });
   });
 
   it('shows the server validation message (e.g. bad UPI id) inside the form', async () => {
@@ -352,7 +358,7 @@ describe('TrustsAdmin (Nanak Roti Trust + donation QR)', () => {
     routes['PATCH /api/admin/trusts/t1'] = () => ({ status: 400, json: { error: 'Enter a valid UPI ID, for example name@oksbi' } });
     render(<TrustsAdmin />);
     await userEvent.click(await screen.findByRole('button', { name: /edit/i }));
-    await userEvent.type(screen.getByLabelText(/UPI ID/), 'bad id');
+    await userEvent.type(screen.getByLabelText(/UPI ID \(optional\)/), 'bad id');
     await userEvent.click(screen.getByRole('button', { name: /save changes/i }));
     expect(await screen.findByRole('alert')).toHaveTextContent(/valid UPI ID/);
   });
@@ -523,5 +529,77 @@ describe('Round 6 admin: Live Kirtan', () => {
     await waitFor(() => expect(calls.find((c) => c.url.endsWith('/schedules') && c.method === 'POST')?.body).toMatchObject({ time: '12:00', days: [0, 1, 2, 3, 4, 5, 6] }));
     await userEvent.click(screen.getByRole('button', { name: /Go live now/ }));
     await waitFor(() => expect(calls.some((c) => c.url.endsWith('/live/broadcast') && c.method === 'POST')).toBe(true));
+  });
+});
+
+
+describe('Round 7: profile, delivery charge, trust payment account, room bookings', () => {
+  it('admin profile: validates the phone, then saves name / phone / photo', async () => {
+    routes['GET /api/auth/me'] = () => ({ json: { email: 'owner@trust.org', name: null, phone: null, avatarUrl: null, lastLoginAt: '2026-11-13T10:00:00Z', createdAt: '2026-01-01T00:00:00Z', role: 'ADMIN' } });
+    routes['PATCH /api/auth/me'] = (b) => ({ json: { email: 'owner@trust.org', ...b } });
+    render(<AccountSettings />);
+    await userEvent.type(await screen.findByLabelText('Full name'), 'Rinku Ji');
+    await userEvent.type(screen.getByLabelText('Mobile number'), '12ab');
+    await userEvent.click(screen.getByRole('button', { name: /save profile/i }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/valid mobile number/i);
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+    await userEvent.clear(screen.getByLabelText('Mobile number')); await userEvent.type(screen.getByLabelText('Mobile number'), '9876543210');
+    await userEvent.click(screen.getByRole('button', { name: /save profile/i }));
+    expect(await screen.findByText('Profile saved.')).toBeInTheDocument();
+    expect(calls.find((c) => c.method === 'PATCH')!.body).toMatchObject({ name: 'Rinku Ji', phone: '9876543210' });
+  });
+
+  it('product form: delivery charge defaults to 0 (free), must be whole rupees, and is sent to the API', async () => {
+    const reload = vi.fn();
+    routes['GET /api/admin/settings/shipping'] = () => ({ json: { freeAbove: 1000 } });
+    routes['POST /api/admin/products'] = () => ({ json: {} });
+    render(<ProductsAdmin products={[]} reload={reload} />);
+    expect(await screen.findByDisplayValue('1000')).toBeInTheDocument(); // free-delivery offer loaded
+    await userEvent.click(screen.getByRole('button', { name: /new product/i }));
+    expect(screen.getByLabelText(/Delivery charge \(₹ per piece\)/)).toHaveValue('0');
+    await userEvent.type(screen.getByPlaceholderText('e.g. Nariyal'), 'Gurbani Pendrive');
+    await userEvent.type(screen.getByPlaceholderText('e.g. 100'), '500');
+    await userEvent.type(screen.getByPlaceholderText('e.g. 25'), '9');
+    await userEvent.clear(screen.getByLabelText(/Delivery charge \(₹ per piece\)/)); await userEvent.type(screen.getByLabelText(/Delivery charge \(₹ per piece\)/), '80');
+    await userEvent.click(screen.getByRole('button', { name: /add product/i }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.url === '/api/admin/products')).toBe(true));
+    expect(calls.find((c) => c.url === '/api/admin/products')!.body).toMatchObject({ name: 'Gurbani Pendrive', price: 500, deliveryCharge: 80 });
+  });
+
+  it('trust with its own Razorpay account: both keys are required, the secret is never pre-filled, then saved with presets', async () => {
+    const own = { id: 't9', slug: 'helping', name: 'Helping Bezubaan', active: true, sortOrder: 2, infoEn: '', infoHi: null, infoHing: null, infoPa: null, qrImageUrl: null, upiId: null, contactPhone: null, contactEmail: null, accountMode: 'DEFAULT', razorpayKeyId: null, hasKeySecret: false, hasWebhookSecret: false, offerQr: true, presets: [] };
+    routes['GET /api/admin/trusts'] = () => ({ json: [own] });
+    routes['PATCH /api/admin/trusts/t9'] = () => ({ json: {} });
+    render(<TrustsAdmin />);
+    await userEvent.click(await screen.findByRole('button', { name: /edit/i }));
+    await userEvent.click(screen.getByLabelText(/This trust’s own Razorpay account/));
+    await userEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/both its Key ID and Key Secret/);
+    expect(calls.some((c) => c.method === 'PATCH')).toBe(false);
+    await userEvent.type(screen.getByPlaceholderText('rzp_live_xxxxxxxxxx'), 'rzp_live_abc12345678');
+    await userEvent.type(screen.getByPlaceholderText('Key Secret'), 'supersecret123');
+    await userEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(calls.some((c) => c.method === 'PATCH')).toBe(true));
+    expect(calls.find((c) => c.method === 'PATCH')!.body).toMatchObject({ accountMode: 'OWN', razorpayKeyId: 'rzp_live_abc12345678', razorpayKeySecret: 'supersecret123' });
+  });
+
+  it('QR-only trust must have a QR image or UPI id', async () => {
+    const t = { id: 't8', slug: 'q', name: 'QR Trust', active: true, sortOrder: 1, infoEn: '', infoHi: null, infoHing: null, infoPa: null, qrImageUrl: null, upiId: null, contactPhone: null, contactEmail: null, accountMode: 'QR_ONLY', razorpayKeyId: null, hasKeySecret: false, hasWebhookSecret: false, offerQr: true, presets: [] };
+    routes['GET /api/admin/trusts'] = () => ({ json: [t] });
+    render(<TrustsAdmin />);
+    await userEvent.click(await screen.findByRole('button', { name: /edit/i }));
+    await userEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    expect(screen.getByRole('alert')).toHaveTextContent(/needs its QR code image/);
+  });
+
+  it('room bookings: lists pending requests and changes the status', async () => {
+    const b = { id: 'r1', reference: 'RM-1-2', name: 'Gurpreet', phone: '919876543210', guests: 4, nights: 2, checkIn: '25 Dec 2026', status: 'PENDING', adminNote: null, createdAt: '2026-11-13T10:00:00Z' };
+    routes['GET /api/admin/room-bookings'] = () => ({ json: [b] });
+    routes['GET /api/admin/settings/rooms'] = () => ({ json: { info: '' } });
+    routes['PATCH /api/admin/room-bookings/r1'] = () => ({ json: { ...b, status: 'CONFIRMED' } });
+    render(<RoomsAdmin />);
+    expect(await screen.findByText('Gurpreet')).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText('Status of RM-1-2'), 'CONFIRMED');
+    await waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ status: 'CONFIRMED' }));
   });
 });

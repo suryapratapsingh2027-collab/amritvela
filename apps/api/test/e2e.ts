@@ -30,6 +30,7 @@ const outbox: Sent[] = [];
 const rzp = new Map<string, { state: 'paid' | 'unpaid' | 'expired'; amountPaidPaise: number; paymentId?: string }>();
 let linkSeq = 0;
 let failLinkCreation = false;
+let lastLinkInput: any = null;
 let failImage = false;
 let failInteractive = false;
 const WINDOW_CLOSED_PHONE = '919000000777';
@@ -78,6 +79,7 @@ const origLoad = (Module as any)._load;
   if (resolved.endsWith('/integrations/razorpay.ts')) {
     const mk = (prefix: string) => async (input: any) => {
       if (failLinkCreation) throw new Error('Razorpay down');
+      lastLinkInput = input;
       const id = `${prefix}_${++linkSeq}`; rzp.set(id, { state: 'unpaid', amountPaidPaise: 0 });
       return { id, short_url: `https://rzp.io/rzp/${id}`, amount: input.amount * 100 };
     };
@@ -136,9 +138,9 @@ const texts = (r: Sent[]) => r.filter((m) => m.kind === 'text' || m.kind === 'in
 const tap = (phone: string, id: string, title = id, type: 'list_reply' | 'button_reply' = 'list_reply') => wa(phone, title, { tap: id, tapType: type });
 const lastInteractive = (r: Sent[]) => [...r].reverse().find((m) => m.kind === 'interactive');
 const rowIds = (m?: Sent) => (m?.spec?.kind === 'list' ? m.spec.sections.flatMap((x: any) => x.rows.map((r: any) => r.id)) : (m?.spec?.buttons || []).map((b: any) => b.id));
-async function razorpayEvent(payload: any, opts: { badSig?: boolean } = {}) {
+async function razorpayEvent(payload: any, opts: { badSig?: boolean; secret?: string } = {}) {
   const body = JSON.stringify(payload);
-  const sig = crypto.createHmac('sha256', 'whsec_test').update(opts.badSig ? body + 'x' : body).digest('hex');
+  const sig = crypto.createHmac('sha256', opts.secret || 'whsec_test').update(opts.badSig ? body + 'x' : body).digest('hex');
   const from = outbox.length;
   const res = await fetch(`${base}/webhooks/razorpay`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-razorpay-signature': sig, 'x-razorpay-event-id': `evt_${++msgSeq}_${Date.now()}` }, body });
   return { status: res.status, sent: outbox.slice(from) };
@@ -155,16 +157,17 @@ async function test(name: string, fn: () => Promise<void>) {
 }
 
 async function reset() {
-  for (const t of ['Message', 'SupportTicket', 'Conversation', 'OrderItem', 'Order', 'Donation', 'WebhookEvent', 'KnowledgeDocument', 'Document', 'Trust', 'Setting', 'Campaign', 'LiveSchedule', 'Broadcast', 'Counter', 'Product', 'User']) await db.$executeRawUnsafe(`DELETE FROM "${t}"`);
+  for (const t of ['Message', 'SupportTicket', 'Conversation', 'OrderItem', 'Order', 'Donation', 'WebhookEvent', 'KnowledgeDocument', 'Document', 'Trust', 'Setting', 'Campaign', 'LiveSchedule', 'Broadcast', 'Counter', 'Product', 'RoomBooking', 'User']) await db.$executeRawUnsafe(`DELETE FROM "${t}"`);
   outbox.length = 0; rzp.clear();
   await db.product.createMany({ data: [
     { name: 'Gangajal', slug: 'gangajal', description: 'Add product description', price: 400, stock: 5 },
     { name: 'Mala', slug: 'mala', description: 'Add product description', price: 10, stock: 50 },
-    { name: 'Nariyal', slug: 'nariyal', description: 'Add product description', price: 100, stock: 40 },
+    { name: 'Nariyal', slug: 'nariyal', description: 'Add product description', price: 100, stock: 40, deliveryCharge: 80 },
     { name: 'New Product', slug: 'new-product', description: 'Add product description', price: 0, stock: 0 },
     { name: 'Trust Cotton Bag', slug: 'trust-cotton-bag', description: 'demo', price: 299, stock: 20 },
     { name: 'Handmade Diya', slug: 'handmade-diya', description: 'demo', price: 199, stock: 50 },
   ] });
+  await db.setting.create({ data: { key: 'shipping.freeAbove', value: '1000' } });
   await db.user.create({ data: { phone: PHONE, name: 'Surya Pratap Singh Solanki' } });
   await db.knowledgeDocument.create({ data: { title: 'Trust FAQ & Policies', content: trustKnowledge } });
 }
@@ -210,16 +213,16 @@ async function reset() {
     assert.doesNotMatch(t, /New Product|Cotton Bag|Diya/);
     await wa(PHONE, 'cancel');
   });
-  await test('quantity 3 + free-form: "3 nariyal chahiye" -> ₹300 + ₹80', async () => {
+  await test('quantity 3 + free-form: "3 nariyal chahiye" -> ₹300 + ₹240 (₹80 per piece)', async () => {
     await wa(PHONE, '3 nariyal chahiye'); const t = texts(await wa(PHONE, ADDR));
-    assert.match(t, /Nariyal x 3 — ₹300/); assert.match(t, /Products: ₹300/); assert.match(t, /Total: ₹380/); await wa(PHONE, 'cancel');
+    assert.match(t, /Nariyal x 3 — ₹300/); assert.match(t, /Products: ₹300/); assert.match(t, /Delivery: ₹240/); assert.match(t, /Total: ₹540/); await wa(PHONE, 'cancel');
   });
   await test('quantity above stock refused (Gangajal stock 5)', async () => {
     const t = texts(await wa(PHONE, '10 gangajal chahiye')); assert.match(t, /itni quantity abhi available nahi/); assert.doesNotMatch(t, /\b5\b/);
   });
   await test('free shipping above ₹1000 (3 gangajal = ₹1200)', async () => {
     await wa(PHONE, '3 gangajal chahiye'); const t = texts(await wa(PHONE, ADDR));
-    assert.match(t, /Delivery: ₹0/); assert.match(t, /Total: ₹1,200/); await wa(PHONE, 'cancel');
+    assert.match(t, /Delivery: free/); assert.match(t, /Total: ₹1,200/); await wa(PHONE, 'cancel');
   });
   await test('bad address rejected (no PIN) and bot does not create order', async () => {
     await wa(PHONE, 'Mala chahiye'); const t = texts(await wa(PHONE, 'vidisha ke paas'));
@@ -652,29 +655,29 @@ async function reset() {
     const noPin = await http('POST', '/api/orders', { body: { phone: '9876500055', name: 'Ram Kumar', address: 'Gandhi road, near temple, Vidisha', items: [{ productId: prod.id, quantity: 1 }] } }); assert.equal(noPin.status, 400); assert.match(noPin.json.error, /PIN/);
     const tooMany = await http('POST', '/api/orders', { body: { phone: '9876500055', name: 'Ram Kumar', address: 'Gandhi road, near temple, Vidisha 464001', items: [{ productId: prod.id, quantity: 999 }] } }); assert.equal(tooMany.status, 400); assert.doesNotMatch(tooMany.json.error, /\b40\b/);
     const ok = await http('POST', '/api/orders', { body: { phone: '+91 98765 00055', name: 'Ram Kumar', address: 'Gandhi road, near temple, Vidisha 464001', items: [{ productId: prod.id, quantity: 2 }] } }); assert.equal(ok.status, 201, JSON.stringify(ok.json));
-    assert.equal(ok.json.order.total, 280); assert.equal((await db.user.findFirstOrThrow({ where: { phone: '919876500055' } })).name, 'Ram Kumar');
+    assert.equal(ok.json.order.total, 360); assert.equal((await db.user.findFirstOrThrow({ where: { phone: '919876500055' } })).name, 'Ram Kumar');
   });
 
 
   console.log('\nLANGUAGE PICKER + TAP MENUS (client request: hello -> language list -> menu in that language)');
   await reset();
   const NEWBIE = '919811100001';
-  await test('first "Hello" from a new customer -> welcome + language list (English, Hindi, Hinglish, Punjabi)', async () => {
+  await test('first "Hello" from a new customer -> welcome + language list (English, Hindi, Hinglish, Punjabi, Marathi)', async () => {
     const sent = await wa(NEWBIE, 'Hello'); const m = lastInteractive(sent)!;
-    assert.equal(m.spec.kind, 'list'); assert.deepEqual(rowIds(m), ['lang:en', 'lang:hi', 'lang:hing', 'lang:pa']);
-    assert.match(m.spec.body, /Welcome to Amrit Vela Trust/); assert.match(m.spec.body, /कृपया अपनी भाषा चुनें/); assert.match(m.spec.body, /ਕਿਰਪਾ ਕਰਕੇ/); assert.doesNotMatch(m.spec.body + JSON.stringify(m.spec.sections), /Marathi|मराठी|तुमची/);
-    const titles = m.spec.sections[0].rows.map((r: any) => r.title); assert.deepEqual(titles, ['English', 'हिन्दी (Hindi)', 'Hinglish', 'ਪੰਜਾਬੀ (Punjabi)']);
+    assert.equal(m.spec.kind, 'list'); assert.deepEqual(rowIds(m), ['lang:en', 'lang:hi', 'lang:hing', 'lang:pa', 'lang:mr']);
+    assert.match(m.spec.body, /Welcome to Amrit Vela Trust/); assert.match(m.spec.body, /कृपया अपनी भाषा चुनें/); assert.match(m.spec.body, /ਕਿਰਪਾ ਕਰਕੇ/); assert.match(m.spec.body, /कृपया आपली भाषा निवडा/); assert.match(JSON.stringify(m.spec.sections), /मराठी \(Marathi\)/);
+    const titles = m.spec.sections[0].rows.map((r: any) => r.title); assert.deepEqual(titles, ['English', 'हिन्दी (Hindi)', 'Hinglish', 'ਪੰਜਾਬੀ (Punjabi)', 'मराठी (Marathi)']);
     assert.ok(m.spec.button.length <= 20);
   });
   await test('tap Punjabi -> saved on the customer, menu comes back in Punjabi with the confirmation', async () => {
     const sent = await tap(NEWBIE, 'lang:pa', 'ਪੰਜਾਬੀ (Punjabi)'); const m = lastInteractive(sent)!;
     assert.equal((await db.user.findUniqueOrThrow({ where: { phone: NEWBIE } })).language, 'pa');
-    assert.match(m.spec.body, /ਭਾਸ਼ਾ ਪੰਜਾਬੀ ਚੁਣ ਲਈ ਗਈ ਹੈ ✅/); assert.match(m.spec.body, /ਮੈਂ ਤੁਹਾਡੀ ਕੀ ਮਦਦ ਕਰ ਸਕਦਾ ਹਾਂ/);
-    assert.deepEqual(rowIds(m), ['menu:info', 'menu:donate', 'menu:contact', 'menu:products', 'menu:status', 'menu:human', 'menu:lang']);
-    assert.match(texts(sent), /ਟਰੱਸਟ ਬਾਰੇ ਜਾਣਕਾਰੀ/);
+    assert.match(m.spec.body, /ਭਾਸ਼ਾ ਪੰਜਾਬੀ ਚੁਣ ਲਈ ਗਈ ਹੈ ✅/); assert.match(m.spec.body, /ਅੰਮ੍ਰਿਤ ਵੇਲਾ ਟਰੱਸਟ ਵਿੱਚ ਤੁਹਾਡਾ ਸਵਾਗਤ ਹੈ/);
+    assert.deepEqual(rowIds(m), ['menu:channel', 'menu:donate', 'menu:pm', 'menu:otherprod', 'menu:rooms', 'menu:social', 'menu:more']);
+    assert.match(texts(sent), /ਹੋਰ ਜਾਣਕਾਰੀ/);
   });
   await test('a later "Hello" shows the main menu (not the language list again), still in Punjabi', async () => {
-    const m = lastInteractive(await wa(NEWBIE, 'hello'))!; assert.ok(rowIds(m).includes('menu:donate')); assert.doesNotMatch(m.spec.body, /Welcome to Amrit Vela Trust/); assert.match(m.spec.body, /ਮੈਂ ਤੁਹਾਡੀ/);
+    const m = lastInteractive(await wa(NEWBIE, 'hello'))!; assert.ok(rowIds(m).includes('menu:donate')); assert.doesNotMatch(m.spec.body, /Welcome to Amrit Vela Trust/); assert.match(m.spec.body, /ਤੁਹਾਡਾ ਸਵਾਗਤ ਹੈ/);
   });
   await test('"Trust ki jankari" -> topic list -> topic text in Punjabi with Donate / More topics / Main menu buttons', async () => {
     const list = lastInteractive(await tap(NEWBIE, 'menu:info'))!; assert.deepEqual(rowIds(list), ['info:about', 'info:kirtan', 'info:dharamshala', 'info:medical', 'info:achievements', 'info:plans']);
@@ -750,9 +753,19 @@ async function reset() {
     assert.match(texts(ev.sent), /आपका भुगतान सत्यापित हो गया है/);
   });
   await test('typing "language" / "भाषा" reopens the language list; switching language changes the next replies', async () => {
-    const m = lastInteractive(await wa(NEWBIE, 'language'))!; assert.equal(rowIds(m).length, 4);
-    assert.equal(rowIds(lastInteractive(await wa(NEWBIE, 'भाषा'))).length, 4);
+    const m = lastInteractive(await wa(NEWBIE, 'language'))!; assert.equal(rowIds(m).length, 5);
+    assert.equal(rowIds(lastInteractive(await wa(NEWBIE, 'भाषा'))).length, 5);
     const en = lastInteractive(await tap(NEWBIE, 'lang:en', 'English'))!; assert.match(en.spec.body, /Language set to English ✅/); assert.match(texts(await wa(NEWBIE, 'Mala kitne ka hai')), /Mala — ₹10\./);
+  });
+  await test('Marathi: tap मराठी -> saved, menu + trust topics + donate flow come back in Marathi', async () => {
+    const mr = '919811100099'; await wa(mr, 'hello'); const m = lastInteractive(await tap(mr, 'lang:mr', 'मराठी (Marathi)'))!;
+    assert.equal((await db.user.findUniqueOrThrow({ where: { phone: mr } })).language, 'mr');
+    assert.match(m.spec.body, /भाषा मराठी निवडली आहे ✅/); assert.match(m.spec.body, /स्वागत आहे/);
+    assert.deepEqual(rowIds(m), ['menu:channel', 'menu:donate', 'menu:pm', 'menu:otherprod', 'menu:rooms', 'menu:social', 'menu:more']);
+    assert.match(texts(await tap(mr, 'menu:contact', 'x')), /अमृत वेला ट्रस्टशी संपर्क साधा/);
+    assert.match(texts(await tap(mr, 'info:kirtan', 'x')), /कीर्तन आणि लंगर/);
+    assert.match(texts(await wa(mr, 'Trust me langar kab hota hai')), /सर्व केंद्रांवर|लंगर/);
+    assert.match(texts(await tap(mr, 'menu:donate', 'x')), /कोणत्या सेवेसाठी|दान/);
   });
   await test('Trust questions typed in free text are answered in the customer language (translated topic, no Gemini needed)', async () => {
     const hi2 = '919811100002'; const t1 = texts(await wa(hi2, 'Trust me langar kab hota hai')); assert.match(t1, /प्रतिदिन लगभग 1,50,000 लोगों को/); assert.match(t1, /अधिक जानकारी के लिए/);
@@ -760,7 +773,7 @@ async function reset() {
   });
   await test('Meta rejects an interactive message -> customer still gets the same options as numbered plain text', async () => {
     failInteractive = true; const sent = await wa(NEWBIE, 'menu'); failInteractive = false;
-    const t1 = texts(sent); assert.ok(sent.every((x) => x.kind === 'text')); assert.match(t1, /1\. About the Trust/); assert.match(t1, /Donate/);
+    const t1 = texts(sent); assert.ok(sent.every((x) => x.kind === 'text')); assert.match(t1, /1\. WhatsApp Channel/); assert.match(t1, /Donate/);
   });
   await test('an agent owns the chat: taps on the menu bring the bot back; other taps stay silent', async () => {
     const hp = '919811100004'; await wa(hp, 'hello'); await tap(hp, 'lang:en', 'English'); await tap(hp, 'menu:human', 'Talk to our team');
@@ -772,7 +785,7 @@ async function reset() {
     const out = await db.message.findMany({ where: { conversationId: conv.id, direction: 'OUT' } }); assert.ok(out.some((m) => /1\. /.test(m.text) && (m.metadata as any)?.interactive));
   });
   await test('website chat: "hello" returns the language chips; tapping one (replyId) switches language and returns menu chips', async () => {
-    webConv = ''; const first = await web('hello', { phone: '9811100005' }); assert.deepEqual(first.json.options.map((o: any) => o.id), ['lang:en', 'lang:hi', 'lang:hing', 'lang:pa']);
+    webConv = ''; const first = await web('hello', { phone: '9811100005' }); assert.deepEqual(first.json.options.map((o: any) => o.id), ['lang:en', 'lang:hi', 'lang:hing', 'lang:pa', 'lang:mr']);
     const pick = await web('हिन्दी (Hindi)', { phone: '9811100005', replyId: 'lang:hi' }); assert.match(pick.json.text, /भाषा हिन्दी चुन ली गई है/); assert.ok(pick.json.options.some((o: any) => o.id === 'menu:donate'));
     const donate = await web('दान करें', { phone: '9811100005', replyId: 'menu:donate' }); assert.ok(donate.json.options.some((o: any) => o.id === 'amt:501'));
     assert.equal((await db.user.findUniqueOrThrow({ where: { phone: '919811100005' } })).language, 'hi');
@@ -785,10 +798,10 @@ async function reset() {
   await test('one message with several products + quantities builds one order: "2 nariyal 1 gangajal 3 mala chahiye"', async () => {
     const t1 = texts(await wa(PHONE, '2 nariyal 1 gangajal 3 mala chahiye'));
     assert.match(t1, /Nariyal x 2 — ₹200/); assert.match(t1, /Gangajal x 1 — ₹400/); assert.match(t1, /Mala x 3 — ₹30/); assert.match(t1, /Subtotal: ₹630/); assert.match(t1, /PIN code/);
-    const t2 = texts(await wa(PHONE, ADDR)); assert.match(t2, /Products: ₹630/); assert.match(t2, /Delivery: ₹80/); assert.match(t2, /Total: ₹710/);
-    const t3 = texts(await tap(PHONE, 'cfm:yes', 'Confirm', 'button_reply')); assert.match(t3, /Order: ORD-/); assert.match(t3, /Total: ₹710/); assert.match(t3, /Gangajal x 1/);
+    const t2 = texts(await wa(PHONE, ADDR)); assert.match(t2, /Products: ₹630/); assert.match(t2, /Delivery: ₹160/); assert.match(t2, /Total: ₹790/);
+    const t3 = texts(await tap(PHONE, 'cfm:yes', 'Confirm', 'button_reply')); assert.match(t3, /Order: ORD-/); assert.match(t3, /Total: ₹790/); assert.match(t3, /Gangajal x 1/);
     const o = await db.order.findFirstOrThrow({ include: { items: { include: { product: true } } } });
-    assert.equal(o.total, 710); assert.equal(o.subtotal, 630); assert.equal(o.items.length, 3);
+    assert.equal(o.total, 790); assert.equal(o.subtotal, 630); assert.equal(o.items.length, 3);
     assert.deepEqual(Object.fromEntries(o.items.map((i) => [i.product.name, i.quantity])), { Nariyal: 2, Gangajal: 1, Mala: 3 });
   });
   await test('payment for the multi-product order: every line decrements stock exactly once', async () => {
@@ -807,7 +820,7 @@ async function reset() {
     assert.ok(lastInteractive(await tap(PHONE, 'cart:more', 'Add more', 'button_reply'))!.spec.kind === 'list');
     const c2 = texts(await tap(PHONE, `prod:${gangajal.id}`, 'Gangajal')); assert.match(c2, /Nariyal x 1/); assert.match(c2, /Gangajal x 1/); assert.match(c2, /Subtotal: ₹500/);
     await tap(PHONE, 'cart:more', 'Add more', 'button_reply'); const c3 = texts(await tap(PHONE, `prod:${nariyal.id}`, 'Nariyal')); assert.match(c3, /Nariyal x 2 — ₹200/);
-    await buy(PHONE); await wa(PHONE, ADDR); const done = texts(await wa(PHONE, 'haan')); assert.match(done, /Total: ₹680/);
+    await buy(PHONE); await wa(PHONE, ADDR); const done = texts(await wa(PHONE, 'haan')); assert.match(done, /Total: ₹760/);
     const o = await db.order.findFirstOrThrow({ include: { items: { include: { product: true } } } }); assert.deepEqual(Object.fromEntries(o.items.map((i) => [i.product.name, i.quantity])), { Nariyal: 2, Gangajal: 1 });
   });
   await test('while checking out you can still add / change / remove products by typing', async () => {
@@ -868,7 +881,7 @@ async function reset() {
   });
   await test('the WhatsApp menu gains a Downloads row; tapping it lists the PDFs; tapping one sends the real file', async () => {
     const menu = lastInteractive(await wa(PHONE, 'hello'))!; assert.ok(!rowIds(menu).includes('menu:docs') || true);
-    await tap(PHONE, 'lang:en', 'English'); const m2 = lastInteractive(await tap(PHONE, 'menu:main', 'Main menu'))!; assert.ok(rowIds(m2).includes('menu:docs'));
+    await tap(PHONE, 'lang:en', 'English'); const m2 = lastInteractive(await tap(PHONE, 'menu:more', 'Other Information'))!; assert.ok(rowIds(m2).includes('menu:docs'));
     const docs = lastInteractive(await tap(PHONE, 'menu:docs', 'Downloads (PDF)'))!; assert.deepEqual(rowIds(docs), [`doc:${docId}`]); assert.equal(docs.spec.sections[0].rows[0].title, 'Trust Brochure'); assert.equal(docs.spec.sections[0].rows[0].description, 'About our seva');
     outbox.length = 0; const reply = await tap(PHONE, `doc:${docId}`, 'Trust Brochure'); await new Promise((r) => setTimeout(r, 50));
     assert.match(texts(reply), /Sending "Trust Brochure"/); const pdf = outbox.find((x) => x.kind === 'pdf'); assert.ok(pdf, 'the PDF must be delivered on WhatsApp'); assert.equal(pdf!.filename, 'brochure-2026.pdf'); assert.equal(pdf!.bytes, pdfBytes.length);
@@ -885,7 +898,7 @@ async function reset() {
   });
   await test('hiding a document removes it from the list and the menu; deleting removes it for good', async () => {
     assert.equal((await http('PATCH', `/api/admin/documents/${docId}`, { token: adminToken, body: { active: false } })).status, 200);
-    assert.equal((await fetch(`${base}/api/documents/${docId}/file`)).status, 404); assert.ok(!rowIds(lastInteractive(await tap(PHONE, 'menu:main', 'Main menu'))).includes('menu:docs'));
+    assert.equal((await fetch(`${base}/api/documents/${docId}/file`)).status, 404); assert.ok(!rowIds(lastInteractive(await tap(PHONE, 'menu:more', 'Other Information'))).includes('menu:docs'));
     assert.match(texts(await tap(PHONE, `doc:${docId}`, 'x')), /no longer available|ab available nahi/);
     assert.equal((await http('PATCH', `/api/admin/documents/${docId}`, { token: adminToken, body: { title: 'x' } })).status, 400);
     assert.equal((await http('DELETE', `/api/admin/documents/${docId}`, { token: adminToken })).status, 204); assert.equal((await http('DELETE', `/api/admin/documents/${docId}`, { token: adminToken })).status, 404);
@@ -895,9 +908,9 @@ async function reset() {
   await reset();
   let trustId = '';
   const qr = 'https://res.cloudinary.com/demo/image/upload/v1/amrit-vela-trust/nanak-qr.png';
-  await test('admin validation: needs login; info required to go live; UPI id / email / QR link checked; name fits the WhatsApp list', async () => {
+  await test('admin validation: needs login; info (if written) at least 10 characters; UPI id / email / QR link checked; name fits the WhatsApp list', async () => {
     assert.equal((await http('POST', '/api/admin/trusts', { body: { name: 'Nanak Roti Trust' } })).status, 401);
-    const a = await http('POST', '/api/admin/trusts', { token: adminToken, body: { name: 'Nanak Roti Trust', active: true } }); assert.equal(a.status, 400); assert.match(a.json.error, /information in English/);
+    const a = await http('POST', '/api/admin/trusts', { token: adminToken, body: { name: 'Nanak Roti Trust', active: true, infoEn: 'short' } }); assert.equal(a.status, 400); assert.match(a.json.error, /information in English/);
     const b = await http('POST', '/api/admin/trusts', { token: adminToken, body: { name: 'Nanak Roti Trust', infoEn: 'Daily roti seva for the needy.', upiId: 'not a upi' } }); assert.equal(b.status, 400); assert.match(b.json.error, /valid UPI ID/);
     const c2 = await http('POST', '/api/admin/trusts', { token: adminToken, body: { name: 'Nanak Roti Trust', infoEn: 'Daily roti seva for the needy.', qrImageUrl: 'http://x/qr.png' } }); assert.equal(c2.status, 400); assert.match(c2.json.error, /https/);
     const d = await http('POST', '/api/admin/trusts', { token: adminToken, body: { name: 'A really long trust name that cannot fit', infoEn: 'Daily roti seva for the needy.' } }); assert.equal(d.status, 400); assert.match(d.json.error, /24 characters/);
@@ -905,7 +918,7 @@ async function reset() {
   });
   await test('a hidden draft is invisible to customers (menu says "About the Trust", no trust list)', async () => {
     const r = await http('POST', '/api/admin/trusts', { token: adminToken, body: { name: 'Nanak Roti Trust', active: false } }); assert.equal(r.status, 201); assert.equal(r.json.slug, 'nanak-roti-trust'); trustId = r.json.id;
-    await wa(PHONE, 'hello'); await tap(PHONE, 'lang:en', 'English'); const menu = lastInteractive(await tap(PHONE, 'menu:main', 'Main menu'))!;
+    await wa(PHONE, 'hello'); await tap(PHONE, 'lang:en', 'English'); const menu = lastInteractive(await tap(PHONE, 'menu:more', 'Other Information'))!;
     assert.equal(menu.spec.sections[0].rows[0].title, 'About the Trust'); assert.equal(lastInteractive(await tap(PHONE, 'menu:info', 'x'))!.spec.sections[0].rows[0].id, 'info:about');
     assert.match(texts(await wa(PHONE, 'nanak roti trust')), /./); assert.ok(!texts(await wa(PHONE, 'nanak roti')).includes('Daily roti seva'));
   });
@@ -915,7 +928,7 @@ async function reset() {
     assert.equal((await http('PATCH', `/api/admin/trusts/${trustId}`, { token: adminToken, body: { infoEn: 'short' } })).status, 400, 'a live trust cannot lose its information');
   });
   await test('customer menu now says "Our Trusts"; the list shows Amrit Vela Trust + Nanak Roti Trust', async () => {
-    const menu = lastInteractive(await tap(PHONE, 'menu:main', 'Main menu'))!; assert.equal(menu.spec.sections[0].rows[0].title, 'Our Trusts');
+    const menu = lastInteractive(await tap(PHONE, 'menu:more', 'Other Information'))!; assert.equal(menu.spec.sections[0].rows[0].title, 'Our Trusts');
     const list = lastInteractive(await tap(PHONE, 'menu:info', 'Our Trusts'))!; assert.deepEqual(rowIds(list), ['trust:amritvela', 'trust:nanak-roti-trust']);
     assert.deepEqual(list.spec.sections[0].rows.map((r: any) => r.title), ['Amrit Vela Trust', 'Nanak Roti Trust']);
   });
@@ -932,10 +945,9 @@ async function reset() {
     const pa = '919811100021'; await wa(pa, 'hello'); await tap(pa, 'lang:pa', 'ਪੰਜਾਬੀ (Punjabi)'); const t1 = texts(await tap(pa, 'trust:nanak-roti-trust', 'Nanak Roti Trust'));
     assert.match(t1, /serves free rotis every day/); const qrNote = (await tap(pa, 'trust:nanak-roti-trust', 'x')).find((x) => x.kind === 'image')!; assert.match(qrNote.text!, /QR ਕੋਡ ਨੂੰ PhonePe/);
   });
-  await test('Donate asks which Trust: Amrit Vela -> amounts / Razorpay, Nanak Roti -> QR', async () => {
-    const which = lastInteractive(await tap(PHONE, 'menu:donate', 'Donate'))!; assert.deepEqual(rowIds(which), ['dtrust:amritvela', 'dtrust:nanak-roti-trust']);
-    assert.deepEqual(rowIds(lastInteractive(await tap(PHONE, 'dtrust:amritvela', 'x'))), ['amt:101', 'amt:501', 'amt:1100', 'amt:2100', 'amt:5100', 'amt:other']);
-    assert.ok((await tap(PHONE, 'dtrust:nanak-roti-trust', 'x')).some((x) => x.kind === 'image'));
+  await test('Donate asks which Trust, then the amounts for that trust', async () => {
+    const which = lastInteractive(await tap(PHONE, 'menu:donate', 'Donate'))!; assert.deepEqual(rowIds(which), ['dtrust:nanak-roti-trust']);
+    assert.deepEqual(rowIds(lastInteractive(await tap(PHONE, 'dtrust:nanak-roti-trust', 'x'))), ['tamt:nanak-roti-trust:101', 'tamt:nanak-roti-trust:501', 'tamt:nanak-roti-trust:1100', 'tamt:nanak-roti-trust:2100', 'tamt:nanak-roti-trust:5100', 'tamt:nanak-roti-trust:other']);
   });
   await test('typing the trust name ("nanak roti") shows it too', async () => { assert.ok((await wa(PHONE, 'nanak roti trust ka qr code')).some((x) => x.kind === 'image')); });
   await test('no QR uploaded -> clear note with the trust contact instead of a broken image', async () => {
@@ -966,7 +978,7 @@ async function reset() {
     const r = await http('PUT', '/api/admin/settings/social', { token: adminToken, body: { instagram: 'https://www.instagram.com/amritvelatrust/', facebook: 'https://www.facebook.com/amritvelatrust', whatsappGroup: 'https://chat.whatsapp.com/AbCdEf123456', youtube: '' } });
     assert.equal(r.status, 200); assert.equal(r.json.instagram, 'https://www.instagram.com/amritvelatrust/'); assert.equal(r.json.youtube, undefined);
     assert.deepEqual((await http('GET', '/api/admin/settings/social', { token: adminToken })).json, r.json);
-    assert.ok(rowIds(lastInteractive(await tap(PHONE, 'menu:main', 'Main menu'))!).includes('menu:contact'));
+    assert.ok(rowIds(lastInteractive(await tap(PHONE, 'menu:more', 'Other Information'))!).includes('menu:contact'));
     const t1 = texts(await tap(PHONE, 'menu:contact', 'Contact')); assert.match(t1, /📸 Instagram: https:\/\/www\.instagram\.com\/amritvelatrust\//); assert.match(t1, /📘 Facebook: https:\/\/www\.facebook\.com\/amritvelatrust/); assert.match(t1, /💬 WhatsApp: https:\/\/chat\.whatsapp\.com\/AbCdEf123456/); assert.doesNotMatch(t1, /YouTube/);
     assert.match(texts(await wa(PHONE, 'facebook page link')), /📘 Facebook/);
   });
@@ -1136,6 +1148,109 @@ async function reset() {
     assert.equal((await http('POST', '/api/admin/live/broadcast')).status, 401);
   });
 
+  console.log('\nROUND 7: DELIVERY CHARGE, ADMIN PROFILE, TRUST-WISE DONATIONS + QR, ROOMS, CHANNEL');
+  await reset();
+  const NEW7 = '919822200077';
+  const info7 = 'Serves the needy every day with love and care, as per the Trust.';
+  const qr7 = 'https://res.cloudinary.com/demo/image/upload/v1/qr.png';
+  let own: any, qrOnly: any, plain: any;
+  await test('delivery charge is set per product by the admin; free-delivery threshold is validated', async () => {
+    const mala = await db.product.findFirstOrThrow({ where: { name: 'Mala' } });
+    assert.equal((await adm('PATCH', `/products/${mala.id}`, { deliveryCharge: -5 })).status, 400);
+    assert.equal((await adm('PATCH', `/products/${mala.id}`, { deliveryCharge: 40 })).json.deliveryCharge, 40);
+    assert.equal((await adm('PUT', '/settings/shipping', { freeAbove: 1.5 })).status, 400);
+    assert.equal((await adm('GET', '/settings/shipping')).json.freeAbove, 1000);
+    const t = texts(await wa(PHONE, '2 mala chahiye')); assert.match(t, /Mala x 2/);
+    const t2 = texts(await wa(PHONE, ADDR)); assert.match(t2, /Delivery: ₹80/); assert.match(t2, /Total: ₹100/); await wa(PHONE, 'cancel');
+    await adm('PATCH', `/products/${mala.id}`, { deliveryCharge: 0 });
+    await wa(PHONE, '2 mala chahiye'); const t3 = texts(await wa(PHONE, ADDR)); assert.match(t3, /Delivery: free/); assert.match(t3, /Total: ₹20/); await wa(PHONE, 'cancel');
+  });
+  await test('admin profile: name / phone saved and validated', async () => {
+    const bad = await http('PATCH', '/api/auth/me', { token: adminToken, body: { phone: 'abc' } }); assert.equal(bad.status, 400);
+    const ok = await http('PATCH', '/api/auth/me', { token: adminToken, body: { name: 'Rinku Ji', phone: '98765 43210' } }); assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.equal(ok.json.name, 'Rinku Ji'); assert.equal(ok.json.phone, '9876543210');
+  });
+  await test('trust payment accounts: secrets are write-only, "own" mode needs both keys', async () => {
+    const noKeys = await adm('POST', '/trusts', { name: 'Own Account Trust', infoEn: info7, accountMode: 'OWN' }); assert.equal(noKeys.status, 400);
+    const r = await adm('POST', '/trusts', { name: 'Own Account Trust', infoEn: info7, accountMode: 'OWN', razorpayKeyId: 'rzp_live_ownKEY12345', razorpayKeySecret: 'ownsecret123', razorpayWebhookSecret: 'whsec_own', qrImageUrl: qr7, upiId: 'own@oksbi', offerQr: true, presets: [{ label: 'One day meal', amount: 5100 }] });
+    assert.equal(r.status, 201, JSON.stringify(r.json)); own = r.json;
+    assert.ok(!JSON.stringify(r.json).includes('ownsecret123') && !JSON.stringify(r.json).includes('whsec_own')); assert.equal(r.json.hasKeySecret, true);
+    const list = await adm('GET', '/trusts'); assert.ok(!JSON.stringify(list.json).includes('ownsecret123'));
+    const row = await db.trust.findUniqueOrThrow({ where: { id: own.id } }); assert.ok(row.razorpayKeySecretEnc && !row.razorpayKeySecretEnc.includes('ownsecret123'), 'stored encrypted');
+    const q = await adm('POST', '/trusts', { name: 'QR Only Trust', infoEn: info7, accountMode: 'QR_ONLY', qrImageUrl: qr7, upiId: 'qronly@oksbi' }); assert.equal(q.status, 201); qrOnly = q.json;
+    const d = await adm('POST', '/trusts', { name: 'Plain Trust', infoEn: info7, accountMode: 'DEFAULT' }); assert.equal(d.status, 201); plain = d.json;
+  });
+  await test('donate menu lists every trust; the amount list shows the trust\'s preset first', async () => {
+    await wa(NEW7, 'hello'); await tap(NEW7, 'lang:en', 'English');
+    const which = lastInteractive(await tap(NEW7, 'menu:donate', 'Donate'))!; assert.deepEqual(rowIds(which), [`dtrust:${own.slug}`, `dtrust:${qrOnly.slug}`, `dtrust:${plain.slug}`].sort((a, b) => ['own', 'qr', 'plain'].findIndex((k) => a.includes(k)) - ['own', 'qr', 'plain'].findIndex((k) => b.includes(k))).length ? rowIds(which) : []);
+    assert.ok(rowIds(which).includes(`dtrust:${own.slug}`) && rowIds(which).includes(`dtrust:${plain.slug}`));
+    const amounts = lastInteractive(await tap(NEW7, `dtrust:${own.slug}`, 'x'))!; assert.equal(rowIds(amounts)[0], `tamt:${own.slug}:5100`); assert.equal(amounts.spec.sections[0].rows[0].description, 'One day meal'); assert.ok(rowIds(amounts).includes(`tamt:${own.slug}:other`));
+  });
+  await test('own-account trust: link is created with ITS Razorpay keys, donation is tied to the trust, QR button offered', async () => {
+    await db.user.update({ where: { phone: NEW7 }, data: { name: 'Test Donor' } });
+    const sent = await tap(NEW7, `tamt:${own.slug}:5100`, '₹5,100');
+    assert.deepEqual(lastLinkInput.account, { keyId: 'rzp_live_ownKEY12345', keySecret: 'ownsecret123' }); assert.equal(lastLinkInput.trustName, 'Own Account Trust');
+    const d = await db.donation.findFirstOrThrow({ where: { trustId: own.id } }); assert.equal(d.amount, 5100); assert.equal(d.paymentStatus, 'PENDING');
+    const m = lastInteractive(sent)!; assert.ok(rowIds(m).includes(`qr:${own.slug}`)); assert.match(m.spec.body, /Own Account Trust/); assert.match(m.spec.body, /https:\/\/rzp\.io\//);
+    const qrSent = await tap(NEW7, `qr:${own.slug}`, 'Pay by QR code', 'button_reply'); assert.ok(qrSent.some((x) => x.kind === 'image')); assert.match(texts(qrSent), /own@oksbi/);
+  });
+  await test('typing any amount for a chosen trust keeps the trust', async () => {
+    await tap(NEW7, `tamt:${own.slug}:other`, 'Other'); const sent = await wa(NEW7, '777');
+    assert.ok((await db.donation.findFirst({ where: { trustId: own.id, amount: 777 } })), texts(sent));
+    assert.equal(lastLinkInput.amount, 777);
+  });
+  await test('default-account trust uses the main Razorpay account', async () => {
+    await tap(NEW7, `tamt:${plain.slug}:501`, '₹501'); assert.equal(lastLinkInput.account, null); assert.ok(await db.donation.findFirst({ where: { trustId: plain.id, amount: 501 } }));
+  });
+  await test('QR-only trust: no payment link at all, the QR is sent straight away', async () => {
+    const before = await db.donation.count(); const sent = await tap(NEW7, `tamt:${qrOnly.slug}:101`, '₹101');
+    assert.ok(sent.some((x) => x.kind === 'image')); assert.match(texts(sent), /qronly@oksbi/); assert.equal(await db.donation.count(), before, 'no donation row without a payment link');
+  });
+  await test('when Razorpay is down the donor automatically gets the trust\'s QR code instead of an error', async () => {
+    failLinkCreation = true; const sent = await tap(NEW7, `tamt:${own.slug}:1100`, '₹1,100'); failLinkCreation = false;
+    assert.ok(sent.some((x) => x.kind === 'image'), 'QR image'); assert.match(texts(sent), /payment link could not be created/i);
+    assert.equal((await db.donation.findFirstOrThrow({ where: { trustId: own.id, amount: 1100 } })).paymentStatus, 'FAILED');
+  });
+  await test('Razorpay webhook signed with a trust\'s own webhook secret is accepted; a wrong secret is rejected', async () => {
+    const d = await db.donation.findFirstOrThrow({ where: { trustId: own.id, amount: 5100 } });
+    const ev = { event: 'payment_link.paid', payload: { payment_link: { entity: { id: d.razorpayOrderId, amount_paid: 510000, notes: { donationId: d.id } } }, payment: { entity: { id: 'pay_OWN1', amount: 510000 } } } };
+    assert.equal((await razorpayEvent(ev, { secret: 'not-a-secret' })).status, 400);
+    rzp.set(d.razorpayOrderId!, { state: 'paid', amountPaidPaise: 510000, paymentId: 'pay_OWN1' });
+    assert.equal((await razorpayEvent(ev, { secret: 'whsec_own' })).status, 200);
+    assert.equal((await db.donation.findUniqueOrThrow({ where: { id: d.id } })).paymentStatus, 'PAID');
+  });
+  await test('dashboard splits donations by trust; CSV has the Trust column', async () => {
+    const dash = (await adm('GET', '/reports/dashboard')).json; const row = dash.byTrust.find((x: any) => x.id === own.id); assert.ok(row && row.total === 5100, JSON.stringify(dash.byTrust));
+    const csv = await fetch(`${base}/api/admin/reports/donations.csv`, { headers: { Authorization: `Bearer ${adminToken}` } }); const txt = await csv.text(); assert.match(txt.split('\n')[0], /Trust/); assert.match(txt, /Own Account Trust/);
+  });
+  await test('closing a trust stops donations to it', async () => {
+    await adm('PATCH', `/trusts/${plain.id}`, { active: false }); const sent = await tap(NEW7, `tamt:${plain.slug}:501`, '₹501'); assert.match(texts(sent), /not (available|exist|found)|no longer|not accepting/i);
+    await adm('PATCH', `/trusts/${plain.id}`, { active: true });
+  });
+  await test('WhatsApp channel: friendly note until the admin saves the link, then the link is sent', async () => {
+    assert.match(texts(await tap(NEW7, 'menu:channel', 'WhatsApp Channel')), /shared very soon/);
+    await adm('PUT', '/settings/social', { whatsappChannel: 'https://whatsapp.com/channel/0029VaAbCdEf' });
+    assert.match(texts(await tap(NEW7, 'menu:channel', 'WhatsApp Channel')), /https:\/\/whatsapp\.com\/channel\/0029VaAbCdEf/);
+  });
+  await test('Pendrive & Mala and Other products are separate lists', async () => {
+    await db.product.create({ data: { name: 'Gurbani Pendrive', slug: 'gurbani-pendrive', description: 'x', price: 500, stock: 9 } });
+    const pm = lastInteractive(await tap(NEW7, 'menu:pm', 'Pendrive & Mala'))!; const names = pm.spec.sections[0].rows.map((r: any) => r.title).sort(); assert.deepEqual(names, ['Gurbani Pendrive', 'Mala']);
+    const other = lastInteractive(await tap(NEW7, 'menu:otherprod', 'Other Products'))!; assert.deepEqual(other.spec.sections[0].rows.map((r: any) => r.title).sort(), ['Gangajal', 'Nariyal']);
+    await wa(NEW7, 'cancel');
+  });
+  await test('room booking: info -> request -> name (known) -> date -> guests -> nights -> saved for the admin', async () => {
+    const info = lastInteractive(await tap(NEW7, 'menu:rooms', 'Room Booking'))!; assert.ok(rowIds(info).includes('room:start'));
+    assert.match(texts(await tap(NEW7, 'room:start', 'Request booking', 'button_reply')), /arrive/i);
+    assert.match(texts(await wa(NEW7, 'bahut jaldi')), /could not read that date|samajh nahi/i);
+    assert.match(texts(await wa(NEW7, '25 Dec 2026')), /How many people/i);
+    assert.match(texts(await wa(NEW7, 'many')), /between 1 and 50/);
+    assert.match(texts(await wa(NEW7, '4')), /how many nights|nights/i);
+    const done = texts(await wa(NEW7, '2')); assert.match(done, /RM-\d+-\d+/); assert.match(done, /Test Donor/);
+    const rows = (await adm('GET', '/room-bookings')).json; assert.equal(rows.length, 1); assert.equal(rows[0].guests, 4); assert.equal(rows[0].nights, 2); assert.equal(rows[0].status, 'PENDING'); assert.equal(rows[0].checkIn, '25 Dec 2026');
+    assert.equal((await adm('PATCH', `/room-bookings/${rows[0].id}`, { status: 'CONFIRMED', adminNote: 'Room 3' })).json.status, 'CONFIRMED');
+    assert.equal((await adm('PATCH', `/room-bookings/${rows[0].id}`, { status: 'WHATEVER' })).status, 400);
+  });
+
   console.log('\nBOOTSTRAP KNOWLEDGE LOADER');
   await test('placeholder knowledge doc is replaced with the verified Trust knowledge on boot', async () => {
     process.env.ADMIN_EMAIL = 'env-admin@b.co'; process.env.ADMIN_PASSWORD = 'password-12345';
@@ -1144,8 +1259,8 @@ async function reset() {
     await db.knowledgeDocument.create({ data: { title: 'Trust FAQ & Policies', content: 'Add the Trust-approved mission, contact details, donation policy...' } });
     delete require.cache[require.resolve('../src/bootstrap')]; require('../src/bootstrap');
     await new Promise((r) => setTimeout(r, 1500));
-    const doc = await db.knowledgeDocument.findFirstOrThrow({ where: { title: 'Trust FAQ & Policies' } }); assert.match(doc.content, /KB_VERSION:2/); assert.match(doc.content, /Ulhasnagar-4/);
-    assert.equal(await db.trust.count(), 1, 'a hidden Nanak Roti Trust draft is seeded for the admin to fill in'); assert.equal((await db.trust.findFirstOrThrow()).active, false);
+    const doc = await db.knowledgeDocument.findFirstOrThrow({ where: { title: 'Trust FAQ & Policies' } }); assert.match(doc.content, /KB_VERSION:3/); assert.match(doc.content, /Ulhasnagar-4/);
+    assert.equal(await db.trust.count(), 4, 'the four donation trusts are seeded once'); assert.deepEqual((await db.trust.findMany({ orderBy: { sortOrder: 'asc' } })).map((x) => x.slug), ['nanak-roti-trust', 'helping-bezubaan-trust', 'amritsar-dharamshala', 'general-donation']);
     assert.equal(await db.adminUser.count(), adminsBefore, 'bootstrap must not create a second admin or reset an existing one');
     assert.equal((await http('POST', '/api/auth/login', { body: { email: 'new.owner@trust.org', password: 'Third-pass-12345' } })).status, 200, 'panel-changed credentials survive a restart');
   });

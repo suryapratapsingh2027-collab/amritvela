@@ -72,6 +72,21 @@ export default function DashboardAdmin({ extra }: { extra?: { orders?: number; c
         </div>
 
         <div className="adm-card adm-card-pad">
+          <h2 className="adm-h2">Donations by trust</h2>
+          <p className="adm-sub">Paid donations, split by the trust each donor chose.</p>
+          {!d.byTrust?.length ? <p className="adm-sub" style={{ marginTop: 14 }}>Trust-wise donations will appear here.</p> : (
+            <div style={{ display: 'grid', gap: 14, marginTop: 16 }}>
+              {d.byTrust.map((t: any) => (
+                <div key={t.id || 'main'}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13.5, fontWeight: 700, marginBottom: 7 }}><span>{t.name}</span><span>{inr(t.total)} · {t.count}</span></div>
+                  <Progress percent={d.byTrust[0].total ? (t.total / d.byTrust[0].total) * 100 : 0} label={t.name} />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="adm-card adm-card-pad">
           <h2 className="adm-h2">Donation report</h2>
           <p className="adm-sub">Download an Excel-ready CSV. Leave the dates empty to export everything.</p>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginTop: 14 }}>

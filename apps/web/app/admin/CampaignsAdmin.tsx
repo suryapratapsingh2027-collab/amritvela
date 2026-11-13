@@ -5,7 +5,7 @@ import { api } from '../../lib/api';
 import ImageUploader from '../../components/ImageUploader';
 import { Alert, Drawer, Field, Progress, StatusBadge, fdate, inr } from './ui';
 
-const BLANK = { title: '', status: 'ACTIVE', targetAmount: '', startsAt: '', endsAt: '', descriptionEn: '', descriptionHi: '', descriptionHing: '', descriptionPa: '', imageUrl: '' as string | null };
+const BLANK = { trustId: '' as string, title: '', status: 'ACTIVE', targetAmount: '', startsAt: '', endsAt: '', descriptionEn: '', descriptionHi: '', descriptionHing: '', descriptionPa: '', descriptionMr: '', imageUrl: '' as string | null };
 const ist = (iso?: string | null) => (iso ? new Date(iso).toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) : '');
 
 export default function CampaignsAdmin() {
@@ -56,7 +56,9 @@ export default function CampaignsAdmin() {
 
 function CampaignForm({ initial, onClose, onSaved }: { initial: any; onClose: () => void; onSaved: () => void }) {
   const isNew = !initial.id;
-  const [f, setF] = useState<any>(isNew ? BLANK : { title: initial.title, status: initial.status, targetAmount: String(initial.targetAmount), startsAt: ist(initial.startsAt), endsAt: ist(initial.endsAt), descriptionEn: initial.descriptionEn || '', descriptionHi: initial.descriptionHi || '', descriptionHing: initial.descriptionHing || '', descriptionPa: initial.descriptionPa || '', imageUrl: initial.imageUrl || null });
+  const [trusts, setTrusts] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => { api<any[]>('/api/admin/trusts').then((r) => setTrusts((r ?? []).map((t) => ({ id: t.id, name: t.name })))).catch(() => undefined); }, []);
+  const [f, setF] = useState<any>(isNew ? BLANK : { trustId: initial.trustId || '', title: initial.title, status: initial.status, targetAmount: String(initial.targetAmount), startsAt: ist(initial.startsAt), endsAt: ist(initial.endsAt), descriptionEn: initial.descriptionEn || '', descriptionHi: initial.descriptionHi || '', descriptionHing: initial.descriptionHing || '', descriptionPa: initial.descriptionPa || '', descriptionMr: initial.descriptionMr || '', imageUrl: initial.imageUrl || null });
   const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
   const set = (k: string, v: any) => setF((x: any) => ({ ...x, [k]: v }));
 
@@ -68,7 +70,7 @@ function CampaignForm({ initial, onClose, onSaved }: { initial: any; onClose: ()
     if (f.startsAt && f.endsAt && f.endsAt < f.startsAt) return setError('The end date cannot be before the start date.');
     setBusy(true);
     try {
-      const body = JSON.stringify({ ...f, targetAmount: target, startsAt: f.startsAt || null, endsAt: f.endsAt || null, imageUrl: f.imageUrl || null });
+      const body = JSON.stringify({ ...f, trustId: f.trustId || null, targetAmount: target, startsAt: f.startsAt || null, endsAt: f.endsAt || null, imageUrl: f.imageUrl || null });
       await api(isNew ? '/api/admin/campaigns' : `/api/admin/campaigns/${initial.id}`, { method: isNew ? 'POST' : 'PATCH', body });
       onSaved();
     } catch (err: any) { setError(err?.message || 'Could not save the campaign.'); } finally { setBusy(false); }
@@ -79,6 +81,7 @@ function CampaignForm({ initial, onClose, onSaved }: { initial: any; onClose: ()
       <form noValidate onSubmit={save} className="adm-grid" style={{ gap: 14 }}>
         {error && <Alert kind="err">{error}</Alert>}
         <Field label="Campaign title"><input className="adm-in" value={f.title} maxLength={80} onChange={(e) => set('title', e.target.value)} placeholder="e.g. Langar Seva" /></Field>
+        <Field label="Which trust receives this campaign's donations?" hint="The money goes to that trust's own account (see Trusts). Leave on “Main account” to use the Trust's main Razorpay account."><select className="adm-in" value={f.trustId} onChange={(e) => set('trustId', e.target.value)}><option value="">Main account (no specific trust)</option>{trusts.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}</select></Field>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
           <Field label="Target amount (₹)"><input className="adm-in" inputMode="numeric" value={f.targetAmount} onChange={(e) => set('targetAmount', e.target.value.replace(/[^\d]/g, ''))} placeholder="100000" /></Field>
           <Field label="Status"><select className="adm-in" value={f.status} onChange={(e) => set('status', e.target.value)}><option value="ACTIVE">Active — accepting donations</option><option value="PAUSED">Paused — hidden</option><option value="COMPLETED">Completed — shown, closed</option></select></Field>
@@ -89,7 +92,8 @@ function CampaignForm({ initial, onClose, onSaved }: { initial: any; onClose: ()
         <Field label="Description — English" hint="Shown to donors. A few lines about what the money is used for."><textarea className="adm-in" value={f.descriptionEn} onChange={(e) => set('descriptionEn', e.target.value)} /></Field>
         <Field label="Description — हिन्दी (optional)"><textarea className="adm-in" value={f.descriptionHi} onChange={(e) => set('descriptionHi', e.target.value)} /></Field>
         <Field label="Description — Hinglish (optional)"><textarea className="adm-in" value={f.descriptionHing} onChange={(e) => set('descriptionHing', e.target.value)} /></Field>
-        <Field label="Description — ਪੰਜਾਬੀ (optional)" hint="If a language is empty, donors in that language see the English text."><textarea className="adm-in" value={f.descriptionPa} onChange={(e) => set('descriptionPa', e.target.value)} /></Field>
+        <Field label="Description — ਪੰਜਾਬੀ (optional)"><textarea className="adm-in" value={f.descriptionPa} onChange={(e) => set('descriptionPa', e.target.value)} /></Field>
+        <Field label="Description — मराठी (optional)" hint="If a language is empty, donors in that language see the English text."><textarea className="adm-in" value={f.descriptionMr} onChange={(e) => set('descriptionMr', e.target.value)} /></Field>
         <div style={{ display: 'flex', gap: 10 }}><button className="adm-btn primary" disabled={busy}>{busy ? 'Saving…' : isNew ? 'Create campaign' : 'Save changes'}</button><button type="button" className="adm-btn" onClick={onClose}>Cancel</button></div>
       </form>
     </Drawer>

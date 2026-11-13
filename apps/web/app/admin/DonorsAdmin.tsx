@@ -4,7 +4,7 @@ import { Search, Download } from 'lucide-react';
 import { api, downloadFile } from '../../lib/api';
 import { Alert, Drawer, Field, Kpi, StatusBadge, fdate, fdatetime, inr } from './ui';
 
-const LANG: Record<string, string> = { en: 'English', hi: 'Hindi', hing: 'Hinglish', pa: 'Punjabi' };
+const LANG: Record<string, string> = { en: 'English', hi: 'Hindi', hing: 'Hinglish', pa: 'Punjabi', mr: 'Marathi' };
 
 export default function DonorsAdmin() {
   const [search, setSearch] = useState('');

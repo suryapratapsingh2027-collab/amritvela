@@ -7,13 +7,15 @@ import { Alert, StatusBadge, fdatetime, inr } from './ui';
 export default function DonationsAdmin({ donations, reload }: { donations: any[]; reload: () => void }) {
   const [q, setQ] = useState('');
   const [status, setStatus] = useState('ALL');
+  const [trust, setTrust] = useState('ALL');
   const [busy, setBusy] = useState('');
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   const rows = useMemo(() => {
     const s = q.trim().toLowerCase();
-    return donations.filter((d) => (status === 'ALL' || d.paymentStatus === status) && (!s || [d.reference, d.receiptNumber, d.user?.name, d.user?.phone, d.campaign?.title].some((v) => String(v || '').toLowerCase().includes(s))));
-  }, [donations, q, status]);
+    return donations.filter((d) => (status === 'ALL' || d.paymentStatus === status) && (trust === 'ALL' || (trust === 'MAIN' ? !d.trustId : d.trustId === trust)) && (!s || [d.reference, d.receiptNumber, d.user?.name, d.user?.phone, d.campaign?.title, d.trust?.name].some((v) => String(v || '').toLowerCase().includes(s))));
+  }, [donations, q, status, trust]);
+  const trustOptions = useMemo(() => { const m = new Map<string, string>(); donations.forEach((d) => { if (d.trustId && d.trust?.name) m.set(d.trustId, d.trust.name); }); return [...m.entries()]; }, [donations]);
 
   async function download(d: any) {
     setBusy(`dl${d.id}`); setNotice(null);
@@ -36,16 +38,20 @@ export default function DonationsAdmin({ donations, reload }: { donations: any[]
         <select className="adm-in" style={{ width: 'auto' }} aria-label="Status" value={status} onChange={(e) => setStatus(e.target.value)}>
           <option value="ALL">All statuses</option><option value="PAID">Paid</option><option value="PENDING">Pending</option><option value="FAILED">Failed</option>
         </select>
+        <select className="adm-in" style={{ width: 'auto' }} aria-label="Trust" value={trust} onChange={(e) => setTrust(e.target.value)}>
+          <option value="ALL">All trusts</option><option value="MAIN">Main account (no trust)</option>{trustOptions.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+        </select>
       </div>
       {notice && <div style={{ padding: '0 20px 14px' }}><Alert kind={notice.kind}>{notice.text}</Alert></div>}
       <div className="adm-table-wrap">
         <table className="adm-table">
-          <thead><tr><th>Donor</th><th>Receipt no.</th><th>Campaign</th><th>Date</th><th>Status</th><th className="adm-num">Amount</th><th>Receipt</th></tr></thead>
+          <thead><tr><th>Donor</th><th>Receipt no.</th><th>Trust</th><th>Campaign</th><th>Date</th><th>Status</th><th className="adm-num">Amount</th><th>Receipt</th></tr></thead>
           <tbody>
             {rows.map((d) => (
               <tr key={d.id}>
                 <td><b>{d.user?.name || '—'}</b><div style={{ color: 'var(--a-muted)', fontSize: 12 }}>{d.user?.phone}</div></td>
                 <td>{d.receiptNumber || <span style={{ color: 'var(--a-muted)' }}>{d.reference}</span>}</td>
+                <td>{d.trust?.name || <span style={{ color: 'var(--a-muted)' }}>Main</span>}</td>
                 <td>{d.campaign?.title || 'General'}</td>
                 <td>{fdatetime(d.paidAt || d.createdAt)}</td>
                 <td><StatusBadge status={d.paymentStatus} /></td>

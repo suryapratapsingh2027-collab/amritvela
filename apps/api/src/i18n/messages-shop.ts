@@ -220,7 +220,7 @@ export const M2 = {
   trusts_section: m('Our Trusts', 'हमारे ट्रस्ट', 'Hamare Trusts', 'ਸਾਡੇ ਟਰੱਸਟ'),
   trust_av_d: m('Kirtan, Langar, Seva & more', 'कीर्तन, लंगर, सेवा और अधिक', 'Kirtan, Langar, Seva aur bahut kuch', 'ਕੀਰਤਨ, ਲੰਗਰ, ਸੇਵਾ ਤੇ ਹੋਰ'),
   trust_row_d: m('Information & donation QR code', 'जानकारी और दान QR कोड', 'Jankari aur donation QR code', 'ਜਾਣਕਾਰੀ ਅਤੇ ਦਾਨ QR ਕੋਡ'),
-  donate_which_body: m(`Which Trust would you like to donate to?`, `आप किस ट्रस्ट को दान देना चाहते हैं?`, `Aap kis Trust ko donation dena chahte hain?`, `ਤੁਸੀਂ ਕਿਹੜੇ ਟਰੱਸਟ ਨੂੰ ਦਾਨ ਦੇਣਾ ਚਾਹੁੰਦੇ ਹੋ?`),
+  donate_which_body: m(`🙏 DHAN GURU NANAK 🙏\n\nJi ❤️, which seva would you like to donate for?`, `🙏 धन गुरु नानक 🙏\n\nजी ❤️, आप किस सेवा के लिए दान करना चाहते हैं?`, `🙏 DHAN GURU NANAK 🙏\n\nJi ❤️, aap kis seva ke liye donation karna chahte hain?`, `🙏 ਧੰਨ ਗੁਰੂ ਨਾਨਕ 🙏\n\nਜੀ ❤️, ਤੁਸੀਂ ਕਿਸ ਸੇਵਾ ਲਈ ਦਾਨ ਕਰਨਾ ਚਾਹੁੰਦੇ ਹੋ?`),
   donate_av_d: m('Pay online, receipt on WhatsApp', 'ऑनलाइन भुगतान, रसीद WhatsApp पर', 'Online payment, receipt WhatsApp par', 'ਔਨਲਾਈਨ ਭੁਗਤਾਨ, ਰਸੀਦ WhatsApp ਤੇ'),
   donate_qr_d: m('Scan the QR code with any UPI app', 'किसी भी UPI ऐप से QR स्कैन करें', 'Kisi bhi UPI app se QR scan karein', 'ਕਿਸੇ ਵੀ UPI ਐਪ ਨਾਲ QR ਸਕੈਨ ਕਰੋ'),
   trust_qr_note: m(

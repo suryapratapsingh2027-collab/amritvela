@@ -2,7 +2,7 @@ import { db } from '../db';
 import type { Lang } from '../i18n';
 
 export type CampaignRow = {
-  id: string; slug: string; title: string; status: string; descriptionEn: string; descriptionHi: string | null; descriptionHing: string | null; descriptionPa: string | null;
+  id: string; slug: string; title: string; status: string; descriptionEn: string; descriptionHi: string | null; descriptionHing: string | null; descriptionPa: string | null; descriptionMr?: string | null;
   imageUrl: string | null; targetAmount: number; startsAt: Date | null; endsAt: Date | null; sortOrder: number; createdAt: Date;
 };
 
@@ -17,8 +17,8 @@ export function effectiveStatus(c: Pick<CampaignRow, 'status' | 'startsAt' | 'en
 
 export const isAcceptingDonations = (c: Pick<CampaignRow, 'status' | 'startsAt' | 'endsAt'>, now = new Date()) => effectiveStatus(c, now) === 'ACTIVE';
 
-export function descriptionFor(c: Pick<CampaignRow, 'descriptionEn' | 'descriptionHi' | 'descriptionHing' | 'descriptionPa'>, lang: Lang | null | undefined): string {
-  const pick = lang === 'hi' ? c.descriptionHi : lang === 'hing' ? c.descriptionHing : lang === 'pa' ? c.descriptionPa : null;
+export function descriptionFor(c: Pick<CampaignRow, 'descriptionEn' | 'descriptionHi' | 'descriptionHing' | 'descriptionPa' | 'descriptionMr'>, lang: Lang | null | undefined): string {
+  const pick = lang === 'hi' ? c.descriptionHi : lang === 'hing' ? c.descriptionHing : lang === 'pa' ? c.descriptionPa : lang === 'mr' ? c.descriptionMr : null;
   return (pick?.trim() || c.descriptionEn).trim();
 }
 

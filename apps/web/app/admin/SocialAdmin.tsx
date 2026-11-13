@@ -2,12 +2,13 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
 
-type Links = { instagram: string; facebook: string; whatsappGroup: string; youtube: string };
-const EMPTY: Links = { instagram: '', facebook: '', whatsappGroup: '', youtube: '' };
+type Links = { instagram: string; facebook: string; whatsappGroup: string; whatsappChannel: string; youtube: string };
+const EMPTY: Links = { instagram: '', facebook: '', whatsappGroup: '', whatsappChannel: '', youtube: '' };
 
 const FIELDS: { key: keyof Links; label: string; placeholder: string; hint: string }[] = [
   { key: 'instagram', label: 'Instagram page link', placeholder: 'https://www.instagram.com/your_page/', hint: 'Open your Instagram page, copy the link from the address bar.' },
   { key: 'facebook', label: 'Facebook page link', placeholder: 'https://www.facebook.com/your.page', hint: 'Open your Facebook page and copy its link.' },
+  { key: 'whatsappChannel', label: 'WhatsApp Channel link', placeholder: 'https://whatsapp.com/channel/XXXXXXXXXXXX', hint: 'Shown when a customer taps “WhatsApp Channel” in the bot menu. In WhatsApp: Updates → your channel → Share → Copy link.' },
   { key: 'whatsappGroup', label: 'WhatsApp group / community invite link', placeholder: 'https://chat.whatsapp.com/XXXXXXXXXXXX', hint: 'In WhatsApp: Group info → Invite to group via link → Copy link.' },
   { key: 'youtube', label: 'YouTube channel link (optional)', placeholder: 'https://www.youtube.com/@your_channel', hint: 'Open your YouTube channel and copy its link.' },
 ];

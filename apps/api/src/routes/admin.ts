@@ -12,6 +12,10 @@ import { audienceSummary, clearLiveNow, describeSlot, getLiveSettings, nextFire,
 import { normalizePhone } from '../utils/phone';
 import { normalizeLang } from '../i18n';
 import { isYmd, istParts } from '../services/time';
+import { sealSecret } from '../utils/secret-box';
+import { paymentAccount } from '../services/trust-accounts';
+import { testRazorpayAccount } from '../integrations/razorpay';
+import { getFreeShippingAbove, setFreeShippingAbove } from '../services/pricing';
 import { SOCIAL_FIELDS, getSocialLinks, saveSocialLinks, validateSocialUrl, type SocialField } from '../services/settings';
 
 const r = Router(); r.use(auth);
@@ -58,6 +62,7 @@ const productInput = z.object({
   description: z.string().trim().max(1000, 'Keep the description within 1000 characters.').optional(),
   price: z.coerce.number().int('Enter the price in whole rupees (no paise).').min(1, 'The price must be at least ₹1.').max(10_000_000, 'The price is too high.'),
   stock: z.coerce.number().int('Enter the stock as a whole number.').min(0, 'Stock cannot be negative.').max(1_000_000, 'The stock quantity is too high.'),
+  deliveryCharge: z.coerce.number().int('Enter the delivery charge in whole rupees (0 = free delivery).').min(0, 'The delivery charge cannot be negative.').max(5000, 'The delivery charge is too high.').optional(),
   category: z.preprocess(emptyToNull, z.string().trim().max(40, 'Keep the category within 40 characters.').nullable().optional()),
   imageUrl: z.preprocess(emptyToNull, z.string().trim().max(2000).refine((v) => /^https:\/\//i.test(v), 'The image link must start with https://').nullable().optional()),
   active: z.boolean().optional(),
@@ -65,7 +70,7 @@ const productInput = z.object({
 // Works with zod v3 and v4: type errors (missing / not a number) are mapped by field instead of constructor options.
 const FIELD_TYPE_MESSAGE: Record<string, string> = {
   name: 'Enter the product name.', price: 'Enter the price as a number.', stock: 'Enter the stock as a number.',
-  title: 'Enter a title.', content: 'Enter the content.', targetAmount: 'Enter the target amount as a number.', text: 'Enter a message.', mode: 'mode must be AI or HUMAN',
+  deliveryCharge: 'Enter the delivery charge as a number (0 = free).', title: 'Enter a title.', content: 'Enter the content.', targetAmount: 'Enter the target amount as a number.', text: 'Enter a message.', mode: 'mode must be AI or HUMAN',
 };
 const zerr = (e: z.ZodError) => {
   const issue = e.issues[0];
@@ -90,7 +95,7 @@ r.post('/products', async (req, res) => {
   if (d.active !== false && (await nameTaken(d.name))) return res.status(409).json({ error: 'A product with this name already exists. Please use a different name.' });
   const created = await db.product.create({ data: {
     name: d.name, slug: await uniqueSlug(d.name), description: d.description ?? '', price: d.price, stock: d.stock,
-    category: d.category ?? null, imageUrl: d.imageUrl ?? null, active: d.active ?? true,
+    category: d.category ?? null, imageUrl: d.imageUrl ?? null, active: d.active ?? true, deliveryCharge: d.deliveryCharge ?? 0,
   } });
   res.status(201).json(created);
 });
@@ -109,7 +114,7 @@ r.patch('/products/:id', async (req, res) => {
     ...(d.name !== undefined ? { name: d.name } : {}), ...(d.description !== undefined ? { description: d.description } : {}),
     ...(d.price !== undefined ? { price: d.price } : {}), ...(d.stock !== undefined ? { stock: d.stock } : {}),
     ...(d.category !== undefined ? { category: d.category } : {}), ...(d.imageUrl !== undefined ? { imageUrl: d.imageUrl } : {}),
-    ...(d.active !== undefined ? { active: d.active } : {}),
+    ...(d.active !== undefined ? { active: d.active } : {}), ...(d.deliveryCharge !== undefined ? { deliveryCharge: d.deliveryCharge } : {}),
   } });
   res.json(updated);
 });
@@ -123,7 +128,7 @@ r.delete('/products/:id', async (req, res) => {
 });
 r.get('/orders', async (_, res) => res.json(await db.order.findMany({ include: { user: true, items: { include: { product: true } } }, orderBy: { createdAt: 'desc' } })));
 r.post('/orders/:id/ship', async (req, res) => { try { res.json(await shipOrder(req.params.id)); } catch (e: any) { res.status(400).json({ error: e.message }); } });
-r.get('/donations', async (_, res) => res.json(await db.donation.findMany({ include: { user: true, campaign: { select: { title: true } } }, orderBy: { createdAt: 'desc' }, take: 500 })));
+r.get('/donations', async (_, res) => res.json(await db.donation.findMany({ include: { user: true, campaign: { select: { title: true } }, trust: { select: { name: true } } }, orderBy: { createdAt: 'desc' }, take: 500 })));
 r.get('/customers', async (_, res) => res.json(await db.user.findMany({ include: { _count: { select: { orders: true, donations: true, conversations: true } } }, orderBy: { createdAt: 'desc' } })));
 /* ------------------------------------------------------------------ support inbox */
 
@@ -286,11 +291,33 @@ const trustInput = z.object({
   infoHi: optionalText(650, 'Hindi information is too long (maximum 650 characters so it fits in one WhatsApp message).'),
   infoHing: optionalText(650, 'Hinglish information is too long (maximum 650 characters so it fits in one WhatsApp message).'),
   infoPa: optionalText(650, 'Punjabi information is too long (maximum 650 characters so it fits in one WhatsApp message).'),
+  infoMr: optionalText(650, 'Marathi information is too long (maximum 650 characters so it fits in one WhatsApp message).'),
   qrImageUrl: z.preprocess(emptyToNull, z.string().trim().max(2000).refine((v) => /^https:\/\//i.test(v), 'The QR image link must start with https://').nullable().optional()),
   upiId: z.preprocess(emptyToNull, z.string().trim().max(80).refine((v) => /^[\w.\-]{2,}@[A-Za-z][\w.\-]{1,}$/.test(v), 'Enter a valid UPI ID, for example name@oksbi').nullable().optional()),
   contactPhone: optionalText(30, 'Phone number is too long.'),
   contactEmail: z.preprocess(emptyToNull, z.string().trim().max(120).refine((v) => /^\S+@\S+\.\S+$/.test(v), 'Enter a valid email address.').nullable().optional()),
+  accountMode: z.string().refine((v) => ['DEFAULT', 'OWN', 'QR_ONLY'].includes(v), 'Choose how this trust receives donations.'),
+  offerQr: z.boolean(),
+  razorpayKeyId: z.preprocess(emptyToNull, z.string().trim().max(60).refine((v) => /^rzp_(live|test)_[A-Za-z0-9]{6,}$/.test(v), 'The Razorpay Key ID looks like rzp_live_xxxxxxxx (copy it from Razorpay > Settings > API Keys).').nullable().optional()),
+  razorpayKeySecret: z.preprocess(emptyToNull, z.string().trim().min(8, 'The Razorpay Key Secret is too short.').max(120).nullable().optional()),
+  razorpayWebhookSecret: z.preprocess(emptyToNull, z.string().trim().min(6, 'The webhook secret is too short.').max(120).nullable().optional()),
+  presets: z.array(z.object({
+    label: z.string().trim().min(2, 'Each quick amount needs a short name (for example "One time langar").').max(40, 'Keep each quick-amount name within 40 characters.'),
+    amount: z.coerce.number().int('Enter quick amounts in whole rupees.').min(1, 'A quick amount must be at least ₹1.').max(10_000_000, 'A quick amount is too high.'),
+  })).max(3, 'You can add at most 3 quick amounts.'),
+  clearRazorpayKeys: z.boolean(),
 });
+
+/** Never send stored secrets to the browser: only whether they exist. */
+const trustView = (t: any) => {
+  const { razorpayKeySecretEnc, razorpayWebhookSecretEnc, ...rest } = t;
+  return { ...rest, hasKeySecret: Boolean(razorpayKeySecretEnc), hasWebhookSecret: Boolean(razorpayWebhookSecretEnc), presets: Array.isArray(t.presets) ? t.presets : [] };
+};
+/** Checks the payment settings of the trust as it would be after saving; returns an error sentence or null. */
+function paymentProblem(next: { accountMode: string; razorpayKeyId: string | null; hasSecret: boolean }): string | null {
+  if (next.accountMode === 'OWN' && (!next.razorpayKeyId || !next.hasSecret)) return 'To use this trust\'s own Razorpay account, enter both its Razorpay Key ID and Key Secret.';
+  return null;
+}
 
 async function uniqueTrustSlug(name: string, exceptId?: string) {
   const base = slugify(name).slice(0, 40) || 'trust';
@@ -303,19 +330,25 @@ async function uniqueTrustSlug(name: string, exceptId?: string) {
   return `${base}-${Date.now()}`;
 }
 
-r.get('/trusts', async (_req, res) => res.json(await db.trust.findMany({ orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] })));
+r.get('/trusts', async (_req, res) => res.json((await db.trust.findMany({ orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] })).map(trustView)));
 
 r.post('/trusts', async (req, res) => {
-  const parsed = trustInput.partial({ active: true, sortOrder: true, infoEn: true }).safeParse(req.body);
+  const parsed = trustInput.partial({ active: true, sortOrder: true, infoEn: true, accountMode: true, offerQr: true, presets: true, clearRazorpayKeys: true }).safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: zerr(parsed.error) });
   const d = parsed.data;
-  if ((d.active ?? true) && (d.infoEn ?? '').length < 10) return res.status(400).json({ error: 'Write the trust information in English (at least 10 characters) before making it visible, or save it as hidden.' });
+  // Information is optional (a trust can be donation-only), but if it is written it must be a real sentence.
+  if ((d.infoEn ?? '').length > 0 && (d.infoEn ?? '').length < 10) return res.status(400).json({ error: 'Write the trust information in English (at least 10 characters), or leave it empty.' });
   const count = await db.trust.count();
-  res.status(201).json(await db.trust.create({ data: {
+  const mode = d.accountMode ?? 'QR_ONLY';
+  const bad = paymentProblem({ accountMode: mode, razorpayKeyId: d.razorpayKeyId ?? null, hasSecret: Boolean(d.razorpayKeySecret) });
+  if (bad) return res.status(400).json({ error: bad });
+  res.status(201).json(trustView(await db.trust.create({ data: {
+    accountMode: mode, offerQr: d.offerQr ?? true, presets: d.presets ?? [], razorpayKeyId: d.razorpayKeyId ?? null,
+    razorpayKeySecretEnc: d.razorpayKeySecret ? sealSecret(d.razorpayKeySecret) : null, razorpayWebhookSecretEnc: d.razorpayWebhookSecret ? sealSecret(d.razorpayWebhookSecret) : null,
     slug: await uniqueTrustSlug(d.name), name: d.name, active: d.active ?? true, sortOrder: d.sortOrder ?? count, infoEn: d.infoEn ?? '',
-    infoHi: d.infoHi ?? null, infoHing: d.infoHing ?? null, infoPa: d.infoPa ?? null, qrImageUrl: d.qrImageUrl ?? null, upiId: d.upiId ?? null,
+    infoHi: d.infoHi ?? null, infoHing: d.infoHing ?? null, infoPa: d.infoPa ?? null, infoMr: d.infoMr ?? null, qrImageUrl: d.qrImageUrl ?? null, upiId: d.upiId ?? null,
     contactPhone: d.contactPhone ?? null, contactEmail: d.contactEmail ?? null,
-  } }));
+  } })));
 });
 
 r.patch('/trusts/:id', async (req, res) => {
@@ -327,15 +360,36 @@ r.patch('/trusts/:id', async (req, res) => {
   const d = parsed.data;
   const nextActive = d.active ?? existing.active;
   const nextInfo = d.infoEn ?? existing.infoEn;
-  if (nextActive && nextInfo.length < 10) return res.status(400).json({ error: 'Write the trust information in English (at least 10 characters) before making it visible.' });
-  res.json(await db.trust.update({ where: { id }, data: {
+  if (nextActive && nextInfo.length > 0 && nextInfo.length < 10) return res.status(400).json({ error: 'Write the trust information in English (at least 10 characters), or leave it empty.' });
+  const nextMode = d.accountMode ?? existing.accountMode;
+  const nextKeyId = d.clearRazorpayKeys ? null : d.razorpayKeyId !== undefined ? d.razorpayKeyId : existing.razorpayKeyId;
+  const nextHasSecret = d.clearRazorpayKeys ? false : d.razorpayKeySecret ? true : Boolean(existing.razorpayKeySecretEnc);
+  const bad = paymentProblem({ accountMode: nextMode, razorpayKeyId: nextKeyId, hasSecret: nextHasSecret });
+  if (bad) return res.status(400).json({ error: bad });
+  res.json(trustView(await db.trust.update({ where: { id }, data: {
+    ...(d.accountMode !== undefined ? { accountMode: d.accountMode } : {}), ...(d.offerQr !== undefined ? { offerQr: d.offerQr } : {}), ...(d.presets !== undefined ? { presets: d.presets } : {}),
+    ...(d.clearRazorpayKeys ? { razorpayKeyId: null, razorpayKeySecretEnc: null, razorpayWebhookSecretEnc: null } : {
+      ...(d.razorpayKeyId !== undefined ? { razorpayKeyId: d.razorpayKeyId } : {}),
+      ...(d.razorpayKeySecret ? { razorpayKeySecretEnc: sealSecret(d.razorpayKeySecret) } : {}),
+      ...(d.razorpayWebhookSecret ? { razorpayWebhookSecretEnc: sealSecret(d.razorpayWebhookSecret) } : {}),
+    }),
     ...(d.name !== undefined ? { name: d.name, slug: await uniqueTrustSlug(d.name, id) } : {}),
     ...(d.active !== undefined ? { active: d.active } : {}), ...(d.sortOrder !== undefined ? { sortOrder: d.sortOrder } : {}),
     ...(d.infoEn !== undefined ? { infoEn: d.infoEn } : {}), ...(d.infoHi !== undefined ? { infoHi: d.infoHi } : {}),
-    ...(d.infoHing !== undefined ? { infoHing: d.infoHing } : {}), ...(d.infoPa !== undefined ? { infoPa: d.infoPa } : {}),
+    ...(d.infoHing !== undefined ? { infoHing: d.infoHing } : {}), ...(d.infoPa !== undefined ? { infoPa: d.infoPa } : {}), ...(d.infoMr !== undefined ? { infoMr: d.infoMr } : {}),
     ...(d.qrImageUrl !== undefined ? { qrImageUrl: d.qrImageUrl } : {}), ...(d.upiId !== undefined ? { upiId: d.upiId } : {}),
     ...(d.contactPhone !== undefined ? { contactPhone: d.contactPhone } : {}), ...(d.contactEmail !== undefined ? { contactEmail: d.contactEmail } : {}),
-  } }));
+  } })));
+});
+
+// Proves the saved keys work (read-only call to Razorpay) without taking any money.
+r.post('/trusts/:id/test-razorpay', async (req, res) => {
+  const t = await db.trust.findUnique({ where: { id: String(req.params.id) } });
+  if (!t) return res.status(404).json({ error: 'Trust not found' });
+  if (t.accountMode === 'QR_ONLY') return res.json({ ok: true, message: 'This trust is set to QR only, so no Razorpay account is used.' });
+  const pay = paymentAccount(t as any);
+  if (!pay.link) return res.status(400).json({ ok: false, error: pay.reason || 'Save the Razorpay Key ID and Key Secret first.' });
+  res.json(await testRazorpayAccount(pay.account));
 });
 
 r.delete('/trusts/:id', async (req, res) => {
@@ -379,7 +433,7 @@ r.post('/donations/:id/resend-receipt', async (req, res) => {
 r.get('/reports/dashboard', async (_req, res) => res.json(await donationDashboard()));
 
 r.get('/reports/donations.csv', async (req, res) => {
-  const q = z.object({ from: z.string().optional(), to: z.string().optional(), status: z.string().optional(), campaignId: z.string().optional() }).safeParse(req.query);
+  const q = z.object({ from: z.string().optional(), to: z.string().optional(), status: z.string().optional(), campaignId: z.string().optional(), trustId: z.string().optional() }).safeParse(req.query);
   if (!q.success) return res.status(400).json({ error: 'Invalid filters.' });
   if ((q.data.from && !isYmd(q.data.from)) || (q.data.to && !isYmd(q.data.to))) return res.status(400).json({ error: 'Dates must be in YYYY-MM-DD format.' });
   const out = await donationsCsv(q.data);
@@ -426,11 +480,13 @@ const campaignInput = z.object({
   descriptionHi: optionalText(1200, 'Hindi description is too long (maximum 1200 characters).'),
   descriptionHing: optionalText(1200, 'Hinglish description is too long (maximum 1200 characters).'),
   descriptionPa: optionalText(1200, 'Punjabi description is too long (maximum 1200 characters).'),
+  descriptionMr: optionalText(1200, 'Marathi description is too long (maximum 1200 characters).'),
   imageUrl: z.preprocess(emptyToNull, z.string().trim().max(2000).refine((v) => /^https:\/\//i.test(v), 'The image link must start with https://').nullable().optional()),
   targetAmount: z.coerce.number().int('Enter the target in whole rupees.').min(100, 'The target must be at least ₹100.').max(1_000_000_000, 'The target is too large.'),
   startsAt: z.preprocess(emptyToNull, z.string().refine(isYmd, 'Enter the start date as YYYY-MM-DD.').nullable().optional()),
   endsAt: z.preprocess(emptyToNull, z.string().refine(isYmd, 'Enter the end date as YYYY-MM-DD.').nullable().optional()),
   sortOrder: z.coerce.number().int().min(0).max(10000),
+  trustId: z.preprocess(emptyToNull, z.string().trim().max(60).nullable().optional()),
 });
 
 async function uniqueCampaignSlug(title: string, exceptId?: string) {
@@ -452,9 +508,10 @@ r.post('/campaigns', async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: zerr(parsed.error) });
   const d = parsed.data;
   if (d.startsAt && d.endsAt && d.endsAt < d.startsAt) return res.status(400).json({ error: 'The end date cannot be before the start date.' });
+  if (d.trustId && !(await db.trust.findUnique({ where: { id: d.trustId }, select: { id: true } }))) return res.status(400).json({ error: 'The selected trust does not exist.' });
   const created = await db.campaign.create({ data: {
-    slug: await uniqueCampaignSlug(d.title), title: d.title, status: d.status ?? 'ACTIVE', descriptionEn: d.descriptionEn ?? '', descriptionHi: d.descriptionHi ?? null, descriptionHing: d.descriptionHing ?? null,
-    descriptionPa: d.descriptionPa ?? null, imageUrl: d.imageUrl ?? null, targetAmount: d.targetAmount, startsAt: dayStart(d.startsAt), endsAt: dayEnd(d.endsAt), sortOrder: d.sortOrder ?? (await db.campaign.count()),
+    trustId: d.trustId ?? null, slug: await uniqueCampaignSlug(d.title), title: d.title, status: d.status ?? 'ACTIVE', descriptionEn: d.descriptionEn ?? '', descriptionHi: d.descriptionHi ?? null, descriptionHing: d.descriptionHing ?? null,
+    descriptionPa: d.descriptionPa ?? null, descriptionMr: d.descriptionMr ?? null, imageUrl: d.imageUrl ?? null, targetAmount: d.targetAmount, startsAt: dayStart(d.startsAt), endsAt: dayEnd(d.endsAt), sortOrder: d.sortOrder ?? (await db.campaign.count()),
   } });
   res.status(201).json(toView(created as CampaignRow, { raised: 0, donations: 0, donors: 0 }));
 });
@@ -469,10 +526,11 @@ r.patch('/campaigns/:id', async (req, res) => {
   const starts = d.startsAt !== undefined ? d.startsAt : existing.startsAt ? istParts(existing.startsAt).ymd : null;
   const ends = d.endsAt !== undefined ? d.endsAt : existing.endsAt ? istParts(existing.endsAt).ymd : null;
   if (starts && ends && ends < starts) return res.status(400).json({ error: 'The end date cannot be before the start date.' });
+  if (d.trustId && !(await db.trust.findUnique({ where: { id: d.trustId }, select: { id: true } }))) return res.status(400).json({ error: 'The selected trust does not exist.' });
   const updated = await db.campaign.update({ where: { id }, data: {
-    ...(d.title !== undefined ? { title: d.title } : {}), ...(d.status !== undefined ? { status: d.status } : {}),
+    ...(d.trustId !== undefined ? { trustId: d.trustId } : {}), ...(d.title !== undefined ? { title: d.title } : {}), ...(d.status !== undefined ? { status: d.status } : {}),
     ...(d.descriptionEn !== undefined ? { descriptionEn: d.descriptionEn } : {}), ...(d.descriptionHi !== undefined ? { descriptionHi: d.descriptionHi } : {}),
-    ...(d.descriptionHing !== undefined ? { descriptionHing: d.descriptionHing } : {}), ...(d.descriptionPa !== undefined ? { descriptionPa: d.descriptionPa } : {}),
+    ...(d.descriptionHing !== undefined ? { descriptionHing: d.descriptionHing } : {}), ...(d.descriptionPa !== undefined ? { descriptionPa: d.descriptionPa } : {}), ...(d.descriptionMr !== undefined ? { descriptionMr: d.descriptionMr } : {}),
     ...(d.imageUrl !== undefined ? { imageUrl: d.imageUrl } : {}), ...(d.targetAmount !== undefined ? { targetAmount: d.targetAmount } : {}),
     ...(d.startsAt !== undefined ? { startsAt: dayStart(d.startsAt) } : {}), ...(d.endsAt !== undefined ? { endsAt: dayEnd(d.endsAt) } : {}), ...(d.sortOrder !== undefined ? { sortOrder: d.sortOrder } : {}),
   } });
@@ -579,6 +637,39 @@ r.get('/live/broadcasts/:id', async (req, res) => {
   const b = await db.broadcast.findUnique({ where: { id: String(req.params.id) } });
   if (!b) return res.status(404).json({ error: 'Not found' });
   res.json(b);
+});
+
+
+
+/* ------------------------------------------------------------------ delivery charge settings */
+
+r.get('/settings/shipping', async (_req, res) => res.json({ freeAbove: await getFreeShippingAbove() }));
+r.put('/settings/shipping', async (req, res) => {
+  const n = Number(req.body?.freeAbove ?? 0);
+  if (!Number.isInteger(n) || n < 0 || n > 10_000_000) return res.status(400).json({ error: 'Enter the free-delivery amount in whole rupees (0 = no free-delivery offer).' });
+  await setFreeShippingAbove(n);
+  res.json({ freeAbove: n });
+});
+
+/* ------------------------------------------------------------------ room booking requests */
+
+const ROOM_STATUSES = ['PENDING', 'CONFIRMED', 'REJECTED', 'CANCELLED'];
+r.get('/room-bookings', async (_req, res) => res.json(await db.roomBooking.findMany({ orderBy: { createdAt: 'desc' }, take: 300 })));
+r.patch('/room-bookings/:id', async (req, res) => {
+  const status = req.body?.status === undefined ? undefined : String(req.body.status);
+  if (status !== undefined && !ROOM_STATUSES.includes(status)) return res.status(400).json({ error: 'Choose a valid status.' });
+  const note = req.body?.adminNote === undefined ? undefined : String(req.body.adminNote ?? '').trim().slice(0, 500);
+  const existing = await db.roomBooking.findUnique({ where: { id: String(req.params.id) } });
+  if (!existing) return res.status(404).json({ error: 'Booking request not found' });
+  res.json(await db.roomBooking.update({ where: { id: existing.id }, data: { ...(status ? { status } : {}), ...(note !== undefined ? { adminNote: note || null } : {}) } }));
+});
+r.get('/settings/rooms', async (_req, res) => { const row = await db.setting.findUnique({ where: { key: 'rooms.info' } }); res.json({ info: row?.value ?? '' }); });
+r.put('/settings/rooms', async (req, res) => {
+  const info = String(req.body?.info ?? '').trim();
+  if (info.length > 700) return res.status(400).json({ error: 'Keep the room information within 700 characters so it fits in one WhatsApp message.' });
+  if (!info) await db.setting.deleteMany({ where: { key: 'rooms.info' } });
+  else await db.setting.upsert({ where: { key: 'rooms.info' }, update: { value: info }, create: { key: 'rooms.info', value: info } });
+  res.json({ info });
 });
 
 export default r;

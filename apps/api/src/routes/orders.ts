@@ -7,7 +7,7 @@ import { auth } from '../middleware/auth';
 import { markOrderPaid, shipOrder } from '../services/fulfillment';
 import { makeInvoice } from '../services/receipt';
 import { env } from '../config';
-import { shippingFor, isSellable } from '../services/pricing';
+import { shippingFor, isSellable, getFreeShippingAbove } from '../services/pricing';
 import { normalizePhone } from '../utils/phone';
 import { extractPin } from '../services/shipping-address';
 
@@ -69,7 +69,7 @@ r.post('/', async (req, res) => {
       0
     );
 
-    const shippingFee = shippingFor(subtotal);
+    const shippingFee = shippingFor(clean.map((i: { productId: string; quantity: number }) => ({ deliveryCharge: (products.find((x: { id: string }) => x.id === i.productId) as any)?.deliveryCharge, qty: i.quantity })), subtotal, await getFreeShippingAbove());
     const total = subtotal + shippingFee;
 
     const user = await db.user.upsert({

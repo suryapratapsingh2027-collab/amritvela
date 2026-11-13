@@ -4,6 +4,7 @@ import { Prisma } from '@prisma/client';
 import { db } from '../db';
 import { env } from '../config';
 import { verifySignature } from '../integrations/razorpay';
+import { extraWebhookSecrets } from '../services/trust-accounts';
 import { interactiveToText, sendWhatsAppImage, sendWhatsAppInteractive, sendWhatsAppText } from '../integrations/whatsapp';
 import { normalizeLang, t } from '../i18n';
 import { isMenuWord } from '../services/bot-nlp';
@@ -237,7 +238,7 @@ r.post('/razorpay', async (req: Request, res: Response) => {
   try {
     const raw = (req as any).rawBody as string | undefined;
     const sig = String(req.headers['x-razorpay-signature'] || '');
-    if (!raw || !verifySignature(raw, sig)) {
+    if (!raw || !verifySignature(raw, sig, await extraWebhookSecrets())) {
       console.error('[RAZORPAY WEBHOOK] Signature verification FAILED. Check RAZORPAY_WEBHOOK_SECRET matches the secret set on the Razorpay webhook.');
       return res.status(400).send('Invalid signature');
     }

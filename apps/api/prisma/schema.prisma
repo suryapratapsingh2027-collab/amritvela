@@ -46,6 +46,7 @@ model User {
   donations Donation[]
   orders Order[]
   conversations Conversation[]
+  roomBookings RoomBooking[]
   // Live Kirtan alerts: customers who have chatted with the bot receive them until they reply STOP.
   liveAlerts Boolean @default(true)
   // Private admin notes about the donor (never shown to the customer).
@@ -59,6 +60,10 @@ model AdminUser {
   role Role @default(STAFF)
   // Bumped on every password change/reset so previously issued JWTs stop working.
   tokenVersion Int @default(0)
+  name String?
+  phone String?
+  avatarUrl String?
+  lastLoginAt DateTime?
   createdAt DateTime @default(now())
   passwordResets PasswordReset[]
 }
@@ -86,6 +91,7 @@ model Product {
   stock Int @default(0)
   active Boolean @default(true)
   category String?
+  deliveryCharge Int @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   items OrderItem[]
@@ -107,13 +113,16 @@ model Donation {
   // Unique, sequential per financial year, e.g. AVT/2026-27/000123. Assigned when the payment is verified.
   receiptNumber String? @unique
   campaignId String?
+  trustId String?
   createdAt DateTime @default(now())
   user User @relation(fields:[userId], references:[id])
   campaign Campaign? @relation(fields:[campaignId], references:[id], onDelete: SetNull)
+  trust Trust? @relation(fields:[trustId], references:[id], onDelete: SetNull)
 
   @@index([paymentStatus, createdAt])
   @@index([razorpayOrderId])
   @@index([campaignId])
+  @@index([trustId])
 }
 
 model Order {
@@ -264,10 +273,23 @@ model Trust {
   infoHi String?
   infoHing String?
   infoPa String?
+  infoMr String?
   qrImageUrl String?
   upiId String?
   contactPhone String?
   contactEmail String?
+  // Where this trust's donations go: DEFAULT = the main Razorpay account (env keys), OWN = this trust's own Razorpay
+  // account (keys below, encrypted), QR_ONLY = no payment link, donors pay by scanning the QR / UPI.
+  accountMode String @default("QR_ONLY")
+  razorpayKeyId String?
+  razorpayKeySecretEnc String?
+  razorpayWebhookSecretEnc String?
+  // Offer the QR code next to the payment link (and use it automatically when the link cannot be created).
+  offerQr Boolean @default(true)
+  // Quick-amount buttons, e.g. [{"label":"One time langar","amount":13000}] (max 3).
+  presets Json?
+  donations Donation[]
+  campaigns Campaign[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -289,11 +311,15 @@ model Campaign {
   descriptionHi String?
   descriptionHing String?
   descriptionPa String?
+  descriptionMr String?
   imageUrl String?
   targetAmount Int
   startsAt DateTime?
   endsAt DateTime?
   sortOrder Int @default(0)
+  // Optional: campaign donations are credited to this trust's payment account.
+  trustId String?
+  trust Trust? @relation(fields:[trustId], references:[id], onDelete: SetNull)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   donations Donation[]
@@ -336,4 +362,24 @@ model Broadcast {
   finishedAt DateTime?
 
   @@index([createdAt])
+}
+
+// Room booking requests collected on WhatsApp; the team confirms them by phone.
+model RoomBooking {
+  id String @id @default(cuid())
+  reference String @unique
+  userId String
+  name String
+  phone String
+  guests Int
+  nights Int
+  checkIn String
+  note String?
+  status String @default("PENDING") // PENDING | CONFIRMED | REJECTED | CANCELLED
+  adminNote String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user User @relation(fields:[userId], references:[id])
+
+  @@index([status, createdAt])
 }

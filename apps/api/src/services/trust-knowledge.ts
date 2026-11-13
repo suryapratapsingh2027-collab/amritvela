@@ -4,7 +4,7 @@
  * Admins can edit/replace this from Admin > Knowledge; bootstrap only auto-updates documents that still carry
  * a KB_VERSION marker (i.e. were never hand-edited).
  */
-export const TRUST_KNOWLEDGE_VERSION = 2;
+export const TRUST_KNOWLEDGE_VERSION = 3;
 export const TRUST_KNOWLEDGE_TITLE = 'Trust FAQ & Policies';
 
 export const trustKnowledge = `KB_VERSION:${TRUST_KNOWLEDGE_VERSION}
@@ -56,7 +56,7 @@ Donations are meant to support the Trust's charitable work. If a payment was mad
 The Trust may distribute spiritual or Trust-related resources such as malas, pendrives, dupattas and rumals, subject to availability. Current products, prices and stock are always taken live from the database. To order on WhatsApp write the product name, for example "Nariyal kharidna hai"; the bot asks for name, full address with 6-digit PIN code, shows a summary to confirm, then sends a Razorpay payment link. An order is confirmed only after payment is verified. Write "products" to see the list, or "Nariyal photo" to see a product's photo.
 
 ## Shipping and delivery
-Delivery on WhatsApp orders costs INR 80, and is free when the product total is INR 1000 or more. Tracking details (courier and AWB) are shared on WhatsApp after dispatch. Delivery timelines depend on the product, destination and courier; the Trust has not published fixed timelines, so do not promise any. For delivery questions contact 6913001300 or amritvelatrustlive@gmail.com. To check an order, send the order number (ORD-...).
+Delivery charge is set per product by the Trust (some products have free delivery); the exact delivery fee is shown in the cart before you pay. Tracking details (courier and AWB) are shared on WhatsApp after dispatch. Delivery timelines depend on the product, destination and courier; the Trust has not published fixed timelines, so do not promise any. For delivery questions contact 6913001300 or amritvelatrustlive@gmail.com. To check an order, send the order number (ORD-...).
 
 ## Customer support
 For questions that need a person, write "human" on WhatsApp or contact 6913001300 / amritvelatrustlive@gmail.com. Write "menu" at any time to see what the bot can do.

@@ -28,7 +28,7 @@ export default function SupportInbox() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [filter, setFilter] = useState<'all' | 'needs'>('all');
-  const bottom = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
   const lastCount = useRef(0);
 
   const loadList = useCallback(async () => {
@@ -47,7 +47,14 @@ export default function SupportInbox() {
     return () => clearInterval(t);
   }, [selected, loadThread]);
   useEffect(() => {
-    if (thread && thread.messages.length !== lastCount.current) { lastCount.current = thread.messages.length; bottom.current?.scrollIntoView({ behavior: 'smooth' }); }
+    const el = scroller.current;
+    if (!thread || !el || thread.messages.length === lastCount.current) return;
+    // Jump to the newest message when the chat opens, or when new ones arrive while you are already at the bottom.
+    // If you have scrolled up to read older messages, polling never pulls you back down.
+    const first = lastCount.current === 0;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+    lastCount.current = thread.messages.length;
+    if (first || nearBottom) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
   }, [thread]);
 
   async function send() {
@@ -73,10 +80,10 @@ export default function SupportInbox() {
   const needs = list.filter((c) => c.awaitingReply).length;
 
   return (
-    <div className="overflow-hidden rounded-3xl border bg-white" style={{ minHeight: 560 }}>
-      <div className="grid md:grid-cols-[340px_1fr]" style={{ minHeight: 560 }}>
+    <div className="overflow-hidden rounded-3xl border bg-white" style={{ height: 'min(700px, calc(100vh - 200px))', minHeight: 460 }}>
+      <div className="grid h-full md:grid-cols-[340px_1fr]" style={{ gridTemplateRows: 'minmax(0, 1fr)' }}>
         {/* conversation list */}
-        <div className={`${selected ? 'hidden md:block' : ''} border-r`} style={{ maxHeight: 680, overflowY: 'auto' }}>
+        <div className={`${selected ? 'hidden md:block' : ''} min-h-0 overflow-y-auto border-r`}>
           <div className="flex gap-2 border-b p-3">
             <button className={`btn ${filter === 'all' ? 'btn-dark' : 'btn-light'}`} style={{ padding: '8px 14px' }} onClick={() => setFilter('all')}>All ({list.length})</button>
             <button className={`btn ${filter === 'needs' ? 'btn-dark' : 'btn-light'}`} style={{ padding: '8px 14px' }} onClick={() => setFilter('needs')}>Needs reply ({needs})</button>
@@ -100,12 +107,12 @@ export default function SupportInbox() {
         </div>
 
         {/* thread */}
-        <div className={`${selected ? '' : 'hidden md:flex'} flex-col`} style={{ maxHeight: 680 }}>
+        <div className={`${selected ? 'flex' : 'hidden md:flex'} min-h-0 flex-col`}>
           {!selected || !thread ? (
             <div className="grid flex-1 place-items-center p-10 text-center text-sm text-neutral-400">{selected ? 'Loading…' : 'Select a conversation from the list.'}</div>
           ) : (
             <>
-              <div className="flex flex-wrap items-center justify-between gap-3 border-b p-4">
+              <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b p-4">
                 <div className="flex items-center gap-3">
                   <button className="md:hidden" onClick={() => setSelected(null)} aria-label="Back"><ArrowLeft size={18} /></button>
                   <div><b>{thread.user.name || phoneLabel(thread.user.phone)}</b><div className="text-xs text-neutral-500">{phoneLabel(thread.user.phone)} · {thread.channel === 'WEB' ? 'Website chat' : 'WhatsApp'}</div></div>
@@ -115,7 +122,7 @@ export default function SupportInbox() {
                   : <button className="btn btn-dark" style={{ padding: '9px 14px' }} onClick={() => setMode('HUMAN')}><UserCheck size={14} /> I will handle this</button>}
               </div>
 
-              <div className="flex-1 space-y-3 overflow-y-auto bg-[#f7f8f4] p-4" style={{ minHeight: 280 }}>
+              <div ref={scroller} className="min-h-0 flex-1 space-y-3 overflow-y-auto overscroll-contain bg-[#f7f8f4] p-4">
                 {thread.messages.map((m) => {
                   const mine = m.direction === 'OUT'; const admin = m.metadata?.by === 'admin';
                   return (
@@ -127,10 +134,9 @@ export default function SupportInbox() {
                     </div>
                   );
                 })}
-                <div ref={bottom} />
               </div>
 
-              <div className="border-t p-3">
+              <div className="shrink-0 border-t p-3">
                 {thread.channel === 'WHATSAPP' && <p className="mb-2 text-xs text-neutral-500">WhatsApp only allows a reply within 24 hours of the customer's last message.</p>}
                 {thread.mode !== 'HUMAN' && <p className="mb-2 text-xs text-neutral-500">As soon as you send a reply the chat is yours and the bot stops answering.</p>}
                 <div className="flex gap-2">

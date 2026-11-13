@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { M } from '../src/i18n/messages';
+import { MR } from '../src/i18n/messages-mr';
 import { LANGS, t, normalizeLang, DEFAULT_LANG } from '../src/i18n';
 
 let n = 0; const ok = (name: string, fn: () => void) => { fn(); n++; console.log('ok -', name); };
 const keys = Object.keys(M) as (keyof typeof M)[];
 const placeholders = (s: string) => [...s.matchAll(/\{(\w+)\}/g)].map((x) => x[1]).sort().join(',');
 
-ok(`every one of ${keys.length} messages exists in all 4 languages and is non-empty`, () => {
+ok(`every one of ${keys.length} messages exists in all 5 languages and is non-empty`, () => {
   for (const k of keys) for (const l of LANGS) assert.ok(String(M[k][l]).trim().length > 0, `${k}.${l} is empty`);
 });
 ok('placeholders are identical across languages (a missing {url} would break a payment message)', () => {
@@ -16,6 +17,12 @@ ok('Hindi/Punjabi use their own script (no accidental English copy)', () => {
   const script: Record<string, RegExp> = { hi: /[\u0900-\u097f]/, pa: /[\u0a00-\u0a7f]/ };
   const allowSame = new Set(['lang_welcome_body', 'lang_button', 'ord_awb', 'm_status', 'price_ok', 'trust_upi_line']);
   for (const k of keys) for (const l of ['hi', 'pa'] as const) { if (allowSame.has(k as string)) continue; assert.match(M[k][l], script[l], `${k}.${l} has no ${l} script`); }
+});
+ok('Marathi: every key has its own Marathi text (no silent Hindi fallback), in Devanagari, different from Hindi', () => {
+  const same = new Set(['lang_welcome_body', 'lang_button', 'ord_awb', 'price_ok', 'trust_upi_line', 'ord_courier', 'ord_tracking', 'ord_invoice_web', 'invoice_caption', 'live_no_timings', 'notice_added', 'notice_updated', 'm_live_d', 'tx_contact', 'tx_social', 'channel_none', 'sec_trust', 'b_menu', 'os_CANCELLED', 'customer_default', 'b_checkout', 'm_docs', 'donate_trusts_section', 'sec_menu', 'm_social']);
+  for (const k of keys) { assert.ok(MR[k as string], `${k} has no Marathi text`); assert.match(MR[k as string], /[\u0900-\u097f]|^\{|^[A-Za-z₹]/, `${k}.mr`); if (!same.has(k as string)) assert.notEqual(MR[k as string], M[k].hi, `${k}.mr is just a copy of Hindi`); }
+  for (const k of Object.keys(MR)) assert.ok(k in M, `MR has an unknown key ${k}`);
+  for (const k of keys) if (k !== 'lang_welcome_body' && !same.has(k as string)) assert.match(M[k].mr, /[\u0900-\u097f]/, `${k}.mr has no Devanagari`);
 });
 ok('Hinglish is written in Roman letters', () => {
   for (const k of keys) { if (k === 'lang_welcome_body') continue; assert.doesNotMatch(M[k].hing, /[\u0900-\u097f\u0a00-\u0a7f]/, `${k}.hing contains native script`); }

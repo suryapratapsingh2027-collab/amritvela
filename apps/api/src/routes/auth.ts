@@ -22,7 +22,8 @@ const firstError = (e: z.ZodError) => {
   return i.code === 'invalid_type' ? 'Some fields are missing or invalid. Please check and try again.' : i.message;
 };
 const findAdminByEmail = (value: string) => db.adminUser.findFirst({ where: { email: { equals: value, mode: 'insensitive' } } });
-const publicUser = (u: { id: string; email: string; role: string }) => ({ id: u.id, email: u.email, role: u.role });
+type AdminRow = { id: string; email: string; role: string; name?: string | null; phone?: string | null; avatarUrl?: string | null; lastLoginAt?: Date | null; createdAt?: Date };
+const publicUser = (u: AdminRow) => ({ id: u.id, email: u.email, role: u.role, name: u.name ?? null, phone: u.phone ?? null, avatarUrl: u.avatarUrl ?? null, lastLoginAt: u.lastLoginAt ?? null, createdAt: u.createdAt ?? null });
 
 r.get('/config', (_, res) => res.json({ mockProviders: env.MOCK_PROVIDERS, emailConfigured: emailConfigured() }));
 
@@ -34,7 +35,8 @@ r.post('/login',
     // Always run bcrypt so response time does not reveal whether the email exists.
     const ok = await bcrypt.compare(String(password || ''), u?.passwordHash || '$2a$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvali');
     if (!u || !ok) return res.status(401).json({ error: 'Invalid credentials' });
-    res.json({ token: signAdmin(u.id, u.tokenVersion), user: publicUser(u) });
+    const seen = await db.adminUser.update({ where: { id: u.id }, data: { lastLoginAt: new Date() } });
+    res.json({ token: signAdmin(u.id, u.tokenVersion), user: publicUser({ ...u, lastLoginAt: seen.lastLoginAt }) });
   });
 
 r.post('/forgot-password',
@@ -78,6 +80,19 @@ r.post('/reset-password',
   });
 
 r.get('/me', auth, (req, res) => res.json(publicUser((req as any).admin)));
+
+const profileInput = z.object({
+  name: z.string().trim().min(2, 'Enter your full name (at least 2 characters).').max(60, 'Keep the name within 60 characters.').nullable().optional(),
+  phone: z.string().trim().transform((v) => v.replace(/[\s-]/g, '')).refine((v) => v === '' || /^\+?\d{10,13}$/.test(v), 'Enter a valid mobile number (10 digits).').nullable().optional(),
+  avatarUrl: z.string().trim().max(2000).refine((v) => v === '' || /^https:\/\//i.test(v), 'The photo link must start with https://').nullable().optional(),
+});
+r.patch('/me', auth, async (req, res) => {
+  const parsed = profileInput.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: firstError(parsed.error) });
+  const d = parsed.data; const blank = (v: string | null | undefined) => (v === undefined ? undefined : v === null || v === '' ? null : v);
+  const u = await db.adminUser.update({ where: { id: (req as any).admin.id }, data: { name: blank(d.name), phone: blank(d.phone), avatarUrl: blank(d.avatarUrl) } });
+  res.json(publicUser(u));
+});
 
 r.post('/change-password', auth, rateLimit({ windowMs: 15 * 60_000, max: 10 }), async (req, res) => {
   const admin = (req as any).admin;

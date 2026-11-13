@@ -7,7 +7,7 @@ const r = Router();
 
 const publicShape = (c: ReturnType<typeof toView>) => ({
   slug: c.slug, title: c.title, status: c.effectiveStatus, imageUrl: c.imageUrl,
-  description: { en: c.descriptionEn, hi: c.descriptionHi, hing: c.descriptionHing, pa: c.descriptionPa },
+  description: { en: c.descriptionEn, hi: c.descriptionHi, hing: c.descriptionHing, pa: c.descriptionPa, mr: c.descriptionMr },
   targetAmount: c.targetAmount, raised: c.raised, percent: c.percent, donors: c.donors, goalReached: c.goalReached, daysLeft: c.daysLeft, endsAt: c.endsAt, acceptingDonations: c.effectiveStatus === 'ACTIVE',
 });
 

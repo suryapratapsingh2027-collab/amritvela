@@ -16,6 +16,9 @@ export default function Donate() {
   const [done, setDone] = useState<any>(null);
   const [campaigns, setCampaigns] = useState<any[]>([]);
   const [campaign, setCampaign] = useState('');
+  const [trusts, setTrusts] = useState<any[]>([]);
+  const [trust, setTrust] = useState('');
+  const [showQr, setShowQr] = useState(false);
 
   useEffect(() => {
     api<any[]>('/api/campaigns').then((list) => {
@@ -23,7 +26,15 @@ export default function Donate() {
       const wanted = new URLSearchParams(window.location.search).get('campaign');
       if (wanted && active.some((c) => c.slug === wanted && c.acceptingDonations)) setCampaign(wanted);
     }).catch(() => undefined); // campaigns are optional: the general donation form still works
+    api<any[]>('/api/donations/trusts').then((list) => {
+      const rows = (list || []).filter((t) => t.slug !== 'general-donation'); setTrusts(rows);
+      const wanted = new URLSearchParams(window.location.search).get('trust');
+      if (wanted && rows.some((t) => t.slug === wanted)) setTrust(wanted);
+    }).catch(() => undefined); // trusts are optional too
   }, []);
+  const pickedTrust = trusts.find((t) => t.slug === trust);
+  const qrOnly = Boolean(pickedTrust && !pickedTrust.online);
+  const hasQr = Boolean(pickedTrust && (pickedTrust.qrImageUrl || pickedTrust.upiId));
   const picked = campaigns.find((c) => c.slug === campaign);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -33,7 +44,7 @@ export default function Donate() {
     if (!/^[6-9]\d{9}$/.test(phone.replace(/\D/g, '').replace(/^(91|0)(?=\d{10}$)/, ''))) { alert('Kripya sahi 10-digit mobile number likhein (receipt isi number se jude rahegi).'); return; }
     setLoading(true);
     try {
-      const result = await api<any>('/api/donations', { method: 'POST', body: JSON.stringify({ amount: Number(amount), name, phone, email, ...(campaign ? { campaignSlug: campaign } : {}) }) });
+      const result = await api<any>('/api/donations', { method: 'POST', body: JSON.stringify({ amount: Number(amount), name, phone, email, ...(campaign ? { campaignSlug: campaign } : {}), ...(trust && !campaign ? { trustSlug: trust } : {}) }) });
       if (result.payment.id.startsWith('mock_')) {
         const paid = await api<any>(`/api/donations/${result.donationId}/mock-pay`, { method: 'POST' });
         setDone(paid.donation);
@@ -93,11 +104,24 @@ export default function Donate() {
                 <form onSubmit={submit} style={{ paddingTop: 40 }}>
                   <span className="section-kicker"><span>02</span> Donation details</span>
                   <h2>Choose an amount.</h2>
+                  {trusts.length > 0 && (
+                    <>
+                      <p className="lead-copy" style={{ marginTop: 14, marginBottom: 8, fontWeight: 700 }}>Which trust would you like to support?</p>
+                      <div className="camp-list" role="radiogroup" aria-label="Trust">
+                        <button type="button" role="radio" aria-checked={!trust} className={`camp-card${!trust ? ' on' : ''}`} onClick={() => { setTrust(''); setShowQr(false); }}><strong>Amrit Vela Trust</strong><small>General donation</small></button>
+                        {trusts.map((t) => (
+                          <button type="button" role="radio" aria-checked={trust === t.slug} key={t.slug} className={`camp-card${trust === t.slug ? ' on' : ''}`} onClick={() => { setTrust(t.slug); setCampaign(''); setShowQr(false); }}>
+                            <strong>{t.name}</strong><small>{t.online ? 'Goes to this trust’s own account' : 'Pay by QR / UPI'}</small>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
                   {campaigns.length > 0 && (
                     <div className="camp-list" role="radiogroup" aria-label="Donate to">
-                      <button type="button" role="radio" aria-checked={!campaign} className={`camp-card${!campaign ? ' on' : ''}`} onClick={() => setCampaign('')}><strong>General donation</strong><small>Wherever the Trust needs it most</small></button>
+                      <button type="button" role="radio" aria-checked={!campaign} className={`camp-card${!campaign ? ' on' : ''}`} onClick={() => { setCampaign(''); }}><strong>General donation</strong><small>Wherever the Trust needs it most</small></button>
                       {campaigns.map((c) => (
-                        <button type="button" role="radio" aria-checked={campaign === c.slug} disabled={!c.acceptingDonations} key={c.slug} className={`camp-card${campaign === c.slug ? ' on' : ''}`} onClick={() => setCampaign(c.slug)}>
+                        <button type="button" role="radio" aria-checked={campaign === c.slug} disabled={!c.acceptingDonations} key={c.slug} className={`camp-card${campaign === c.slug ? ' on' : ''}`} onClick={() => { setCampaign(c.slug); setTrust(''); }}>
                           {c.imageUrl && <img src={c.imageUrl} alt="" />}
                           <strong>{c.title}</strong>
                           <div className="camp-bar" role="progressbar" aria-valuenow={c.percent} aria-valuemin={0} aria-valuemax={100} aria-label={`${c.title} progress`}><i style={{ width: `${c.percent}%` }} /></div>
@@ -116,7 +140,26 @@ export default function Donate() {
                     <input className="input" value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="WhatsApp / mobile number" required />
                     <input className="input" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (optional)" />
                   </div>
-                  <button disabled={loading} className="btn btn-primary" style={{ width: '100%', marginTop: 16 }}>{loading ? 'Preparing payment…' : `Continue with ₹${amount}${picked ? ` · ${picked.title}` : ''}`}</button>
+                  {qrOnly ? (
+                    <div style={{ marginTop: 16, textAlign: 'center' }}>
+                      {pickedTrust?.qrImageUrl && <img src={pickedTrust.qrImageUrl} alt={`${pickedTrust.name} donation QR code`} style={{ width: 240, maxWidth: '100%', margin: '0 auto', background: '#fff', borderRadius: 14, border: '1px solid var(--line)' }} />}
+                      <p className="lead-copy" style={{ marginTop: 10 }}>Scan this QR code with PhonePe, Google Pay, Paytm or any UPI app to donate to <b>{pickedTrust?.name}</b>.{pickedTrust?.upiId ? <> UPI ID: <b>{pickedTrust.upiId}</b></> : null}</p>
+                      {!hasQr && <p className="lead-copy">The QR code for this trust is not available yet. Please contact {pickedTrust?.contactPhone || '6913001300'}.</p>}
+                    </div>
+                  ) : (
+                    <button disabled={loading} className="btn btn-primary" style={{ width: '100%', marginTop: 16 }}>{loading ? 'Preparing payment…' : `Continue with ₹${amount}${picked ? ` · ${picked.title}` : pickedTrust ? ` · ${pickedTrust.name}` : ''}`}</button>
+                  )}
+                  {!qrOnly && hasQr && (
+                    <div style={{ marginTop: 12, textAlign: 'center' }}>
+                      <button type="button" className="text-link" onClick={() => setShowQr((v) => !v)}>{showQr ? 'Hide QR code' : 'Payment not working? Pay by QR code'}</button>
+                      {showQr && (
+                        <div style={{ marginTop: 10 }}>
+                          {pickedTrust?.qrImageUrl && <img src={pickedTrust.qrImageUrl} alt={`${pickedTrust.name} donation QR code`} style={{ width: 220, maxWidth: '100%', margin: '0 auto', background: '#fff', borderRadius: 14, border: '1px solid var(--line)' }} />}
+                          <p className="lead-copy" style={{ marginTop: 8 }}>Scan with any UPI app.{pickedTrust?.upiId ? <> UPI ID: <b>{pickedTrust.upiId}</b></> : null}</p>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </form>
               )}
             </div>

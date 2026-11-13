@@ -15,12 +15,13 @@ import { env } from '../config';
 import { sendWhatsAppPdf, sendWhatsAppText, toWhatsAppImageUrl, type InteractiveSpec } from '../integrations/whatsapp';
 import { createOrderPaymentLink } from '../integrations/razorpay';
 import { createDonationLink } from './donation-payment-link';
+import { randomInt } from 'crypto';
 import { reconcileDonation, reconcileOrder, sendReceiptPdf } from './payments';
 import { sendOrderInvoice } from './fulfillment';
 import { getSocialLinks } from './settings';
 import { activeCampaignViews, descriptionFor, isAcceptingDonations, campaignStats, toView } from './campaigns';
 import { getLiveSettings, liveStatusForBot } from './live';
-import { isSellable, money, shippingFor } from './pricing';
+import { isSellable, money, shippingFor, getFreeShippingAbove } from './pricing';
 import { M } from '../i18n/messages';
 import { DEFAULT_LANG, LANGS, LANG_TITLES, isLang, normalizeLang, t, type Lang, type MessageKey } from '../i18n';
 import {
@@ -45,10 +46,11 @@ type State =
   | { step: 'AWAIT_NAME'; at: number; items: CartItem[]; address?: string; pin?: string }
   | { step: 'AWAIT_ADDRESS'; at: number; items: CartItem[] }
   | { step: 'AWAIT_CONFIRM'; at: number; items: CartItem[]; address: string; pin: string }
-  | { step: 'AWAIT_DONATION_AMOUNT'; at: number; campaignId?: string }
-  | { step: 'AWAIT_DONATION_NAME'; at: number; amount: number; campaignId?: string };
+  | { step: 'AWAIT_DONATION_AMOUNT'; at: number; campaignId?: string; trustId?: string }
+  | { step: 'AWAIT_DONATION_NAME'; at: number; amount: number; campaignId?: string; trustId?: string }
+  | { step: 'ROOM'; at: number; stage: 'name' | 'date' | 'guests' | 'nights'; name?: string; checkIn?: string; guests?: number };
 
-type ProductRow = { id: string; name: string; slug: string; price: number; stock: number; active: boolean; currency: string; imageUrl: string | null };
+type ProductRow = { id: string; name: string; slug: string; price: number; stock: number; active: boolean; currency: string; imageUrl: string | null; deliveryCharge: number };
 
 /** Translate in the customer's language; {support} is always available. */
 const T = (c: Pick<Ctx, 'lang'>, key: MessageKey, vars: Record<string, string | number> = {}) => t(c.lang, key, { support: t(c.lang, 'support'), ...vars });
@@ -77,7 +79,7 @@ async function writeState(conversationId: string, state: State | null) {
 async function loadProducts(): Promise<ProductRow[]> {
   const rows = await db.product.findMany({
     where: { active: true }, orderBy: { name: 'asc' }, take: 100,
-    select: { id: true, name: true, slug: true, price: true, stock: true, active: true, currency: true, imageUrl: true },
+    select: { id: true, name: true, slug: true, price: true, stock: true, active: true, currency: true, imageUrl: true, deliveryCharge: true },
   });
   return rows.filter(isSellable);
 }
@@ -93,6 +95,7 @@ async function socialLines(): Promise<string[]> {
   const out: string[] = [];
   if (s.instagram) out.push(`📸 Instagram: ${s.instagram}`);
   if (s.facebook) out.push(`📘 Facebook: ${s.facebook}`);
+  if (s.whatsappChannel) out.push(`📢 WhatsApp Channel: ${s.whatsappChannel}`);
   if (s.whatsappGroup) out.push(`💬 WhatsApp: ${s.whatsappGroup}`);
   if (s.youtube) out.push(`▶️ YouTube: ${s.youtube}`);
   return out;
@@ -100,6 +103,8 @@ async function socialLines(): Promise<string[]> {
 
 /** Trusts the admin added besides Amrit Vela Trust (for example Nanak Roti Trust). */
 const activeTrusts = () => db.trust.findMany({ where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }] });
+/** Trusts shown under Trust information (the catch-all General Donation entry is only for donating). */
+const infoTrusts = async () => (await activeTrusts()).filter((x) => x.slug !== 'general-donation' && x.infoEn.trim().length >= 10);
 const activeDocuments = () => db.document.findMany({ where: { active: true }, orderBy: [{ sortOrder: 'asc' }, { createdAt: 'desc' }], select: { id: true, title: true, description: true } });
 
 /** First message of a new conversation: welcome + language list (shown in all scripts, since the language is not known yet). */
@@ -111,31 +116,43 @@ function languageMenu(c: Ctx): BotReply {
 }
 
 async function mainMenu(c: Ctx, prefix?: string): Promise<BotReply> {
-  const [trusts, docs, live] = await Promise.all([activeTrusts(), activeDocuments(), getLiveSettings()]);
-  const trustRows = [
-    trusts.length
-      ? { id: 'menu:info', title: T(c, 'm_trusts'), description: T(c, 'm_trusts_d') }
-      : { id: 'menu:info', title: T(c, 'm_info'), description: T(c, 'm_info_d') },
+  const live = await getLiveSettings();
+  const rows = [
+    { id: 'menu:channel', title: T(c, 'm_channel'), description: T(c, 'm_channel_d') },
     { id: 'menu:donate', title: T(c, 'm_donate'), description: T(c, 'm_donate_d') },
+    { id: 'menu:pm', title: T(c, 'm_pm'), description: T(c, 'm_pm_d') },
+    { id: 'menu:otherprod', title: T(c, 'm_otherprod'), description: T(c, 'm_otherprod_d') },
+    { id: 'menu:rooms', title: T(c, 'm_rooms'), description: T(c, 'm_rooms_d') },
+    { id: 'menu:social', title: T(c, 'm_social'), description: T(c, 'm_social_d') },
     ...(live.url && live.enabled ? [{ id: 'menu:live', title: T(c, 'm_live'), description: T(c, 'm_live_d') }] : []),
-    { id: 'menu:contact', title: T(c, 'm_contact') },
+    { id: 'menu:more', title: T(c, 'm_more'), description: T(c, 'm_more_d') },
   ];
-  const helpRows = [
+  return list(c, 'MENU', { body: `${prefix ? `${prefix}\n\n` : ''}${T(c, 'menu_body')}`, button: T(c, 'menu_button'), sections: [{ title: T(c, 'sec_menu'), rows }] });
+}
+
+/** "Other information": Trust information, order status, documents, contact, human help, language. */
+async function moreMenu(c: Ctx): Promise<BotReply> {
+  const [trusts, docs] = await Promise.all([infoTrusts(), activeDocuments()]);
+  const rows = [
+    trusts.length ? { id: 'menu:info', title: T(c, 'm_trusts'), description: T(c, 'm_trusts_d') } : { id: 'menu:info', title: T(c, 'm_info'), description: T(c, 'm_info_d') },
+    { id: 'menu:status', title: T(c, 'm_status') },
     ...(docs.length ? [{ id: 'menu:docs', title: T(c, 'm_docs'), description: T(c, 'm_docs_d') }] : []),
+    { id: 'menu:contact', title: T(c, 'm_contact') },
     { id: 'menu:human', title: T(c, 'm_human') },
     { id: 'menu:lang', title: T(c, 'm_lang') },
   ];
-  return list(c, 'MENU', {
-    body: `${prefix ? `${prefix}\n\n` : ''}${T(c, 'menu_body')}`, button: T(c, 'menu_button'),
-    sections: [
-      { title: T(c, 'sec_trust'), rows: trustRows },
-      { title: T(c, 'sec_shop'), rows: [
-        { id: 'menu:products', title: T(c, 'm_products'), description: T(c, 'm_products_d') },
-        { id: 'menu:status', title: T(c, 'm_status') },
-      ] },
-      { title: T(c, 'sec_help'), rows: helpRows },
-    ],
-  });
+  return list(c, 'MORE', { body: T(c, 'more_body'), button: T(c, 'more_button'), sections: [{ title: T(c, 'm_more'), rows }] });
+}
+
+async function channelReply(c: Ctx): Promise<BotReply> {
+  const url = (await getSocialLinks()).whatsappChannel;
+  if (!url) return buttons('CHANNEL', T(c, 'channel_none'), [{ id: 'menu:main', title: T(c, 'b_menu') }]);
+  return buttons('CHANNEL', T(c, 'tx_channel', { url }), [{ id: 'menu:donate', title: T(c, 'b_donate') }, { id: 'menu:main', title: T(c, 'b_menu') }]);
+}
+
+async function roomsReply(c: Ctx): Promise<BotReply> {
+  const info = (await db.setting.findUnique({ where: { key: 'rooms.info' } }))?.value?.trim();
+  return buttons('ROOMS', info || T(c, 'room_info_default'), [{ id: 'room:start', title: T(c, 'b_room_req') }, { id: 'menu:main', title: T(c, 'b_menu') }]);
 }
 
 const TOPICS = ['about', 'kirtan', 'dharamshala', 'medical', 'achievements', 'plans'] as const;
@@ -167,7 +184,7 @@ async function socialReply(c: Ctx): Promise<BotReply> {
 /** "Which Trust?" list for Trust information. */
 async function trustsMenu(c: Ctx, purpose: 'info' | 'donate'): Promise<BotReply> {
   if (purpose === 'donate') return donateMenu(c);
-  const trusts = await activeTrusts();
+  const trusts = await infoTrusts();
   if (!trusts.length) return topicsMenu(c);
   return list(c, 'TRUSTS', {
     body: T(c, 'trusts_body'), button: T(c, 'trusts_button'),
@@ -178,16 +195,46 @@ async function trustsMenu(c: Ctx, purpose: 'info' | 'donate'): Promise<BotReply>
   });
 }
 
-/** Donate: general donation (Razorpay), running campaigns (progress shown) and the QR trusts. Straight to amounts when there is nothing else. */
+/** Donate: one row per trust (each pays into its own account), then running campaigns. Straight to amounts when there are no trusts. */
 async function donateMenu(c: Ctx): Promise<BotReply> {
   const [campaigns, trusts] = await Promise.all([activeCampaignViews(), activeTrusts()]);
-  if (!campaigns.length && !trusts.length) return donationMenu(c);
-  const shownCampaigns = campaigns.slice(0, Math.max(1, 9 - Math.min(trusts.length, 3)));
-  const shownTrusts = trusts.slice(0, 9 - shownCampaigns.length);
-  const sections = [{ title: T(c, 'donate_section'), rows: [{ id: 'dtrust:amritvela', title: 'Amrit Vela Trust', description: T(c, 'donate_av_d') }] }] as { title?: string; rows: { id: string; title: string; description?: string }[] }[];
-  if (shownCampaigns.length) sections.push({ title: T(c, 'donate_campaigns_section'), rows: shownCampaigns.map((x) => ({ id: `camp:${x.slug}`, title: x.title, description: T(c, 'camp_row_d', { raised: x.raised.toLocaleString('en-IN'), target: x.targetAmount.toLocaleString('en-IN') }) })) });
-  if (shownTrusts.length) sections.push({ title: T(c, 'donate_trusts_section'), rows: shownTrusts.map((x) => ({ id: `dtrust:${x.slug}`, title: x.name, description: T(c, 'donate_qr_d') })) });
+  if (!trusts.length && !campaigns.length) return donationMenu(c);
+  const shownTrusts = trusts.slice(0, 9);
+  const shownCampaigns = campaigns.slice(0, Math.max(0, 10 - shownTrusts.length - (trusts.length ? 0 : 1)));
+  const sections = [] as { title?: string; rows: { id: string; title: string; description?: string }[] }[];
+  const trustRows = shownTrusts.map((x) => ({ id: `dtrust:${x.slug}`, title: x.name.slice(0, 24), description: T(c, 'donate_link_d') }));
+  if (!trusts.length) trustRows.push({ id: 'dtrust:amritvela', title: 'Amrit Vela Trust', description: T(c, 'donate_av_d') });
+  sections.push({ title: T(c, 'donate_section'), rows: trustRows });
+  if (shownCampaigns.length) sections.push({ title: T(c, 'donate_campaigns_section'), rows: shownCampaigns.map((x) => ({ id: `camp:${x.slug}`, title: x.title.slice(0, 24), description: T(c, 'camp_row_d', { raised: x.raised.toLocaleString('en-IN'), target: x.targetAmount.toLocaleString('en-IN') }) })) });
   return list(c, 'DONATE_WHICH', { body: T(c, 'donate_which_body'), button: T(c, 'trusts_button'), sections });
+}
+
+type Preset = { label: string; amount: number };
+const presetsOf = (tr: { presets: unknown }): Preset[] =>
+  (Array.isArray(tr.presets) ? (tr.presets as any[]) : []).map((x) => ({ label: String(x?.label ?? '').slice(0, 72), amount: Math.round(Number(x?.amount)) })).filter((x) => Number.isSafeInteger(x.amount) && x.amount >= 1 && x.amount <= MAX_DONATION).slice(0, 3);
+
+/** Amount list for one trust: the admin's preset amounts first, then the usual ones, then "other amount". */
+async function trustDonateReply(c: Ctx, slug: string): Promise<BotReply> {
+  const tr = await db.trust.findFirst({ where: { slug, active: true } });
+  if (!tr) return { intent: 'TRUST', text: T(c, 'trust_gone') };
+  const presets = presetsOf(tr);
+  const used = new Set(presets.map((x) => x.amount));
+  const rows = [
+    ...presets.map((x) => ({ id: `tamt:${slug}:${x.amount}`, title: `₹${x.amount.toLocaleString('en-IN')}`, ...(x.label ? { description: x.label } : {}) })),
+    ...DONATION_AMOUNTS.filter((a) => !used.has(a)).slice(0, 9 - presets.length).map((a) => ({ id: `tamt:${slug}:${a}`, title: `₹${a.toLocaleString('en-IN')}` })),
+    { id: `tamt:${slug}:other`, title: T(c, 'amt_other') },
+  ];
+  return list(c, 'DONATION_AMOUNT', { body: T(c, 'trust_amount_body', { trust: tr.name }), button: T(c, 'trust_amount_button'), sections: [{ title: T(c, 'donate_section'), rows }] });
+}
+
+/** The trust's QR code / UPI id (also the automatic fallback when no payment link can be made). */
+function qrReply(c: Ctx, tr: { name: string; qrImageUrl: string | null; upiId: string | null; contactPhone: string | null }, lead?: string): BotReply {
+  const qr = toWhatsAppImageUrl(tr.qrImageUrl);
+  const lines = [lead ?? `*${tr.name}*`];
+  if (tr.upiId) lines.push('', T(c, 'trust_upi_line', { upi: tr.upiId }));
+  if (!qr && !tr.upiId) return { intent: 'TRUST_QR', text: T(c, 'trust_no_qr', { support: tr.contactPhone ? `📞 ${tr.contactPhone}` : t(c.lang, 'support') }) };
+  const reply = buttons('TRUST_QR', lines.join('\n'), [{ id: 'menu:donate', title: T(c, 'b_donate') }, { id: 'menu:main', title: T(c, 'b_menu') }]);
+  return qr ? { ...reply, image: { url: qr, caption: T(c, 'trust_qr_note', { name: tr.name }) } } : reply;
 }
 
 /** A campaign: image, description, goal / raised / percent, and the quick-amount list for that campaign. */
@@ -206,8 +253,8 @@ async function campaignReply(c: Ctx, slug: string): Promise<BotReply> {
   return img ? { ...reply, image: { url: img, caption: row.title } } : reply;
 }
 
-const infoFor = (tr: { infoEn: string; infoHi: string | null; infoHing: string | null; infoPa: string | null }, lang: Lang) =>
-  (lang === 'hi' ? tr.infoHi : lang === 'hing' ? tr.infoHing : lang === 'pa' ? tr.infoPa : null)?.trim() || tr.infoEn.trim();
+const infoFor = (tr: { infoEn: string; infoHi: string | null; infoHing: string | null; infoPa: string | null; infoMr?: string | null }, lang: Lang) =>
+  (lang === 'hi' ? tr.infoHi : lang === 'hing' ? tr.infoHing : lang === 'pa' ? tr.infoPa : lang === 'mr' ? tr.infoMr : null)?.trim() || tr.infoEn.trim();
 
 /** Information about an admin-managed trust + the QR code donors scan to pay by PhonePe / any UPI app. */
 async function managedTrustReply(c: Ctx, slug: string): Promise<BotReply> {
@@ -266,12 +313,15 @@ function donationMenu(c: Ctx): BotReply {
   });
 }
 
-function productMenu(c: Ctx, products: ProductRow[]): BotReply {
-  const available = products.filter((p) => p.stock > 0);
-  if (!available.length) return { intent: 'SHOP', text: T(c, 'no_products') };
+/** Pendrive & Mala are their own menu entry; everything else is "Other products". */
+const isPendriveMala = (p: ProductRow) => /pen\s*-?drive|\bmala\b|माला|पेनड्राइव|ਮਾਲਾ|ਪੈਨਡ੍ਰਾਈਵ/i.test(`${p.name} ${p.slug}`);
+
+function productMenu(c: Ctx, products: ProductRow[], group: 'all' | 'pm' | 'other' = 'all'): BotReply {
+  const available = products.filter((p) => p.stock > 0 && (group === 'all' || (group === 'pm') === isPendriveMala(p)));
+  if (!available.length) return { intent: 'SHOP', text: T(c, group === 'pm' ? 'pm_none' : group === 'other' ? 'other_none' : 'no_products') };
   return list(c, 'SHOP', {
-    body: T(c, 'product_list_body'), button: T(c, 'product_list_button'), footer: T(c, 'product_footer', { name: available[0].name }),
-    sections: [{ title: T(c, 'product_list_section'), rows: available.map((p) => ({ id: `prod:${p.id}`, title: p.name, description: money(p.price) })) }],
+    body: T(c, group === 'pm' ? 'pm_body' : 'product_list_body'), button: T(c, 'product_list_button'), footer: T(c, 'product_footer', { name: available[0].name }),
+    sections: [{ title: T(c, 'product_list_section'), rows: available.slice(0, 10).map((p) => ({ id: `prod:${p.id}`, title: p.name, description: money(p.price) })) }],
   });
 }
 
@@ -377,6 +427,16 @@ async function handleReplyId(c: Ctx, id: string): Promise<BotReply | null> {
         case 'lang': await writeState(c.conversationId, null); return languageMenu(c);
         case 'human': return humanReply(c);
         case 'donate': await writeState(c.conversationId, null); return donateMenu(c);
+        case 'channel': await writeState(c.conversationId, null); return channelReply(c);
+        case 'more': await writeState(c.conversationId, null); return moreMenu(c);
+        case 'rooms': await writeState(c.conversationId, null); return roomsReply(c);
+        case 'pm':
+        case 'otherprod': {
+          const state = await readState(c.conversationId);
+          const items = state && 'items' in state ? state.items : [];
+          await writeState(c.conversationId, { step: 'AWAIT_PRODUCT', at: Date.now(), items });
+          return productMenu(c, await loadProducts(), arg === 'pm' ? 'pm' : 'other');
+        }
         case 'live': await writeState(c.conversationId, null); return liveReply(c);
         case 'products': {
           const state = await readState(c.conversationId);
@@ -395,7 +455,31 @@ async function handleReplyId(c: Ctx, id: string): Promise<BotReply | null> {
     }
     case 'dtrust': {
       await writeState(c.conversationId, null);
-      return arg === 'amritvela' ? donationMenu(c) : managedTrustReply(c, arg);
+      return arg === 'amritvela' ? donationMenu(c) : trustDonateReply(c, arg);
+    }
+    case 'tamt': {
+      const j = arg.lastIndexOf(':');
+      const slug = arg.slice(0, j), amountArg = arg.slice(j + 1);
+      const tr = j > 0 ? await db.trust.findFirst({ where: { slug, active: true } }) : null;
+      if (!tr) return { intent: 'TRUST', text: T(c, 'trust_gone') };
+      if (amountArg === 'other') {
+        await writeState(c.conversationId, { step: 'AWAIT_DONATION_AMOUNT', at: Date.now(), trustId: tr.id });
+        return { intent: 'DONATION_AMOUNT', text: T(c, 'trust_amount_type', { trust: tr.name }) };
+      }
+      const amount = Number(amountArg);
+      if (!DONATION_AMOUNTS.includes(amount) && !presetsOf(tr).some((x) => x.amount === amount)) return null;
+      return donationWithAmount(c, amount, undefined, tr.id);
+    }
+    case 'qr': {
+      const tr = await db.trust.findFirst({ where: { slug: arg, active: true } });
+      return tr ? qrReply(c, tr) : { intent: 'TRUST', text: T(c, 'trust_gone') };
+    }
+    case 'room': {
+      if (arg !== 'start') return null;
+      const user = await db.user.findUnique({ where: { phone: c.phone } });
+      if (user?.name) { await writeState(c.conversationId, { step: 'ROOM', at: Date.now(), stage: 'date', name: user.name }); return { intent: 'ROOM', text: T(c, 'room_ask_date') }; }
+      await writeState(c.conversationId, { step: 'ROOM', at: Date.now(), stage: 'name' });
+      return { intent: 'ROOM', text: T(c, 'room_ask_name') };
     }
     case 'info': {
       if (!(TOPICS as readonly string[]).includes(arg)) return null;
@@ -471,37 +555,51 @@ async function liveReply(c: Ctx): Promise<BotReply> {
 
 /* ------------------------------------------------------------------ donations */
 
-async function donationWithAmount(c: Ctx, amount: number, campaignId?: string): Promise<BotReply> {
+async function donationWithAmount(c: Ctx, amount: number, campaignId?: string, trustId?: string): Promise<BotReply> {
+  // A QR-only trust has no payment link: show the QR straight away, no name needed.
+  if (trustId) {
+    const tr = await db.trust.findUnique({ where: { id: trustId } });
+    if (!tr || !tr.active) { await writeState(c.conversationId, null); return { intent: 'TRUST', text: T(c, 'trust_closed') }; }
+    if (tr.accountMode === 'QR_ONLY') { await writeState(c.conversationId, null); return qrReply(c, tr); }
+  }
   const user = await db.user.findUnique({ where: { phone: c.phone } });
   if (!user?.name) {
-    await writeState(c.conversationId, { step: 'AWAIT_DONATION_NAME', at: Date.now(), amount, ...(campaignId ? { campaignId } : {}) });
+    await writeState(c.conversationId, { step: 'AWAIT_DONATION_NAME', at: Date.now(), amount, ...(campaignId ? { campaignId } : {}), ...(trustId ? { trustId } : {}) });
     return { intent: 'DONATION_NAME', text: T(c, 'donate_ask_name', { amount: amount.toLocaleString('en-IN') }) };
   }
-  return createDonationReply(c, amount, campaignId);
+  return createDonationReply(c, amount, campaignId, trustId);
 }
 
-async function handleDonationStart(c: Ctx, text: string, allowBare = false): Promise<BotReply> {
+async function handleDonationStart(c: Ctx, text: string, allowBare = false, scope: { campaignId?: string; trustId?: string } = {}): Promise<BotReply> {
   const parsed = parseAmount(text, { allowBare });
   if (parsed.amount == null) {
     if (parsed.reason === 'decimal') return { intent: 'DONATION_AMOUNT', text: T(c, 'donate_decimal') };
     if (parsed.reason === 'range') return { intent: 'DONATION_AMOUNT', text: T(c, 'donate_range', { max: MAX_DONATION.toLocaleString('en-IN') }) };
     // No amount typed: offer the quick-amount list (customers can still type any amount).
-    await writeState(c.conversationId, { step: 'AWAIT_DONATION_AMOUNT', at: Date.now() });
+    await writeState(c.conversationId, { step: 'AWAIT_DONATION_AMOUNT', at: Date.now(), ...scope });
     return donationMenu(c);
   }
-  return donationWithAmount(c, parsed.amount);
+  return donationWithAmount(c, parsed.amount, scope.campaignId, scope.trustId);
 }
 
-async function createDonationReply(c: Ctx, amount: number, campaignId?: string): Promise<BotReply> {
+async function createDonationReply(c: Ctx, amount: number, campaignId?: string, trustId?: string): Promise<BotReply> {
   await writeState(c.conversationId, null);
+  const trust = trustId ? await db.trust.findUnique({ where: { id: trustId } }) : null;
   try {
     const user = await db.user.findUnique({ where: { phone: c.phone } });
-    const result = await createDonationLink({ phone: c.phone, name: user?.name, email: user?.email, amount, lang: c.lang, campaignId });
+    const result = await createDonationLink({ phone: c.phone, name: user?.name, email: user?.email, amount, lang: c.lang, campaignId, trustId });
     if (result.mock) return { intent: 'DONATION', text: T(c, 'donate_mock', { ref: result.reference }) };
+    // Offer the QR next to the link when this trust has one: some donors' payment apps do not open links.
+    if (trust?.offerQr && (trust.qrImageUrl || trust.upiId)) {
+      return buttons('DONATION', result.message, [{ id: `qr:${trust.slug}`, title: T(c, 'b_qr') }, { id: 'menu:main', title: T(c, 'b_menu') }]);
+    }
     return { intent: 'DONATION', text: result.message };
   } catch (e: any) {
     if (e?.code === 'CAMPAIGN_CLOSED') return { intent: 'CAMPAIGN', text: T(c, 'camp_gone') };
+    if (e?.code === 'TRUST_CLOSED') return { intent: 'TRUST', text: T(c, 'trust_closed') };
     console.error('[BOT] Donation link creation failed:', e?.error?.description || e?.message || e);
+    // No link possible: fall back to this trust's QR code if it has one.
+    if (trust && (trust.qrImageUrl || trust.upiId)) return qrReply(c, trust, T(c, 'qr_fallback', { trust: trust.name }));
     return { intent: 'DONATION_ERROR', text: T(c, 'link_error') };
   }
 }
@@ -613,11 +711,11 @@ async function orderStatusReply(c: Ctx, orderId: string, wantsInvoice: boolean):
 type Next = { mode: 'cart' | 'checkout'; keep?: { address: string; pin: string } };
 type Mention = CartMention<ProductRow>;
 
-function cartView(c: Ctx, items: CartItem[], products: ProductRow[]) {
+async function cartView(c: Ctx, items: CartItem[], products: ProductRow[]) {
   const rows = items.map((i) => ({ p: products.find((x) => x.id === i.productId), qty: i.qty })).filter((r): r is { p: ProductRow; qty: number } => Boolean(r.p));
   const subtotal = rows.reduce((n, r) => n + r.p.price * r.qty, 0);
   const lines = rows.map((r) => `• ${r.p.name} x ${r.qty} — ${money(r.p.price * r.qty)}`).join('\n');
-  return { rows, subtotal, lines, fee: shippingFor(subtotal), example: rows[0]?.p.name ?? 'Nariyal' };
+  return { rows, subtotal, lines, fee: shippingFor(rows.map((r) => ({ deliveryCharge: r.p.deliveryCharge, qty: r.qty })), subtotal, await getFreeShippingAbove()), example: rows[0]?.p.name ?? 'Nariyal' };
 }
 
 /** Adds / changes / removes products in the cart, then shows the cart or moves on to checkout. */
@@ -652,14 +750,14 @@ async function applyToCart(c: Ctx, items: CartItem[], mentions: Mention[], remov
 
 async function cartReply(c: Ctx, items: CartItem[], products: ProductRow[], notices: string[] = [], image?: BotReply['image']): Promise<BotReply> {
   await writeState(c.conversationId, { step: 'CART', at: Date.now(), items });
-  const v = cartView(c, items, products);
+  const v = await cartView(c, items, products);
   const body = `${notices.length ? `${notices.join('\n')}\n\n` : ''}${T(c, 'cart_body', { lines: v.lines, subtotal: money(v.subtotal), example: v.example })}`;
   return { ...buttons('CART', body, [{ id: 'cart:checkout', title: T(c, 'b_checkout') }, { id: 'cart:more', title: T(c, 'b_add_more') }, { id: 'cart:clear', title: T(c, 'b_clear') }]), ...(image ? { image } : {}) };
 }
 
 /** Next missing piece of the order: name -> address -> confirmation. */
 async function checkoutStep(c: Ctx, items: CartItem[], products: ProductRow[], keep?: { address: string; pin: string }, notices: string[] = [], image?: BotReply['image']): Promise<BotReply> {
-  const v = cartView(c, items, products);
+  const v = await cartView(c, items, products);
   if (!v.rows.length) return productMenu(c, products);
   const head = notices.length ? `${notices.join('\n')}\n\n` : '';
   const user = await db.user.findUnique({ where: { phone: c.phone } });
@@ -674,8 +772,8 @@ async function checkoutStep(c: Ctx, items: CartItem[], products: ProductRow[], k
 
 async function confirmationReply(c: Ctx, items: CartItem[], products: ProductRow[], name: string, address: string, pin: string, notices: string[] = []): Promise<BotReply> {
   await writeState(c.conversationId, { step: 'AWAIT_CONFIRM', at: Date.now(), items, address, pin });
-  const v = cartView(c, items, products);
-  const body = `${notices.length ? `${notices.join('\n')}\n\n` : ''}${T(c, 'confirm_summary', { lines: v.lines, price: money(v.subtotal), fee: money(v.fee), total: money(v.subtotal + v.fee), name, address })}`;
+  const v = await cartView(c, items, products);
+  const body = `${notices.length ? `${notices.join('\n')}\n\n` : ''}${T(c, 'confirm_summary', { lines: v.lines, price: money(v.subtotal), fee: v.fee === 0 ? T(c, 'fee_free') : money(v.fee), total: money(v.subtotal + v.fee), name, address })}`;
   return buttons('SHOP_CONFIRM', body, [{ id: 'cfm:yes', title: T(c, 'b_confirm') }, { id: 'cfm:addr', title: T(c, 'b_address') }, { id: 'cfm:no', title: T(c, 'b_cancel') }]);
 }
 
@@ -720,8 +818,8 @@ async function handleState(c: Ctx, text: string, state: State): Promise<BotReply
   switch (state.step) {
     case 'AWAIT_DONATION_AMOUNT': {
       const parsed = parseAmount(text, { allowBare: true });
-      if (parsed.amount != null) return donationWithAmount(c, parsed.amount, state.campaignId);
-      if (parsed.reason === 'decimal' || parsed.reason === 'range') return handleDonationStart(c, text, true);
+      if (parsed.amount != null) return donationWithAmount(c, parsed.amount, state.campaignId, state.trustId);
+      if (parsed.reason === 'decimal' || parsed.reason === 'range') return handleDonationStart(c, text, true, { campaignId: state.campaignId, trustId: state.trustId });
       // A product message while waiting for an amount: leave donation mode.
       if (parseCartItems(text, await loadProducts()).items.length || hasBuyIntent(text) || hasCatalogIntent(text)) { await writeState(c.conversationId, null); return null; }
       return { intent: 'DONATION_AMOUNT', text: T(c, 'donate_amount_retry') };
@@ -731,8 +829,10 @@ async function handleState(c: Ctx, text: string, state: State): Promise<BotReply
       const name = validateName(text);
       if (!name.ok) return { intent: 'DONATION_NAME', text: T(c, 'donate_name_retry') };
       await db.user.update({ where: { phone: c.phone }, data: { name: name.name } });
-      return createDonationReply(c, state.amount, state.campaignId);
+      return createDonationReply(c, state.amount, state.campaignId, state.trustId);
     }
+
+    case 'ROOM': return handleRoom(c, text, state);
 
     case 'AWAIT_PRODUCT':
     case 'CART': {
@@ -825,7 +925,7 @@ async function placeOrder(c: Ctx, state: Extract<State, { step: 'AWAIT_CONFIRM' 
 
   const rows = state.items.map((i) => ({ p: fresh.find((x) => x.id === i.productId)!, qty: i.qty }));
   const subtotal = rows.reduce((n, r) => n + r.p.price * r.qty, 0);
-  const shippingFee = shippingFor(subtotal);
+  const shippingFee = shippingFor(rows.map((r) => ({ deliveryCharge: r.p.deliveryCharge, qty: r.qty })), subtotal, await getFreeShippingAbove());
   const total = subtotal + shippingFee;
   const orderNumber = `ORD-${Date.now()}-${Math.floor(Math.random() * 900 + 100)}`;
 
@@ -846,12 +946,49 @@ async function placeOrder(c: Ctx, state: Extract<State, { step: 'AWAIT_CONFIRM' 
     await writeState(c.conversationId, null);
     if (String(link.id).startsWith('mock_')) return { intent: 'SHOP_ORDER', text: T(c, 'order_mock', { number: orderNumber }) };
     const lines = rows.map((r) => `• ${r.p.name} x ${r.qty} — ${money(r.p.price * r.qty)}`).join('\n');
-    return { intent: 'SHOP_ORDER', text: T(c, 'order_created', { number: orderNumber, lines, price: money(subtotal), fee: money(shippingFee), total: money(total), url }) };
+    return { intent: 'SHOP_ORDER', text: T(c, 'order_created', { number: orderNumber, lines, price: money(subtotal), fee: shippingFee === 0 ? T(c, 'fee_free') : money(shippingFee), total: money(total), url }) };
   } catch (e: any) {
     console.error('[BOT] Order payment link failed:', e?.error?.description || e?.message || e);
     await db.order.update({ where: { id: order.id }, data: { status: 'CANCELLED', paymentStatus: 'FAILED' } }).catch(() => undefined);
     // Keep the confirm step so the customer can simply tap Confirm again.
     await writeState(c.conversationId, { ...state, at: Date.now() });
     return { intent: 'SHOP_ERROR', text: T(c, 'order_link_error') };
+  }
+}
+
+/* ------------------------------------------------------------------ room booking request */
+
+const MONTHS = /jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|जनवरी|फ़रवरी|फरवरी|मार्च|अप्रैल|मई|जून|जुलाई|अगस्त|सितंबर|अक्तूबर|अक्टूबर|नवंबर|दिसंबर|ਜਨਵਰੀ|ਫ਼ਰਵਰੀ|ਮਾਰਚ|ਅਪ੍ਰੈਲ|ਮਈ|ਜੂਨ|ਜੁਲਾਈ|ਅਗਸਤ|ਸਤੰਬਰ|ਅਕਤੂਬਰ|ਨਵੰਬਰ|ਦਸੰਬਰ|today|tomorrow|aaj|kal|parso|आज|कल|ਅੱਜ|ਕੱਲ/i;
+
+async function handleRoom(c: Ctx, text: string, state: Extract<State, { step: 'ROOM' }>): Promise<BotReply> {
+  const keep = (patch: Partial<Extract<State, { step: 'ROOM' }>>) => writeState(c.conversationId, { ...state, ...patch, at: Date.now() } as State);
+  switch (state.stage) {
+    case 'name': {
+      const name = validateName(text);
+      if (!name.ok) return { intent: 'ROOM', text: T(c, 'room_ask_name') };
+      await keep({ stage: 'date', name: name.name });
+      return { intent: 'ROOM', text: T(c, 'room_ask_date') };
+    }
+    case 'date': {
+      const v = text.replace(/\s+/g, ' ').trim();
+      if (v.length < 3 || v.length > 40 || !(/\d/.test(v) || MONTHS.test(v))) return { intent: 'ROOM', text: T(c, 'room_date_retry') };
+      await keep({ stage: 'guests', checkIn: v });
+      return { intent: 'ROOM', text: T(c, 'room_ask_guests') };
+    }
+    case 'guests': {
+      const n = Number(text.match(/\d{1,3}/)?.[0]);
+      if (!Number.isInteger(n) || n < 1 || n > 50) return { intent: 'ROOM', text: T(c, 'room_guests_retry') };
+      await keep({ stage: 'nights', guests: n });
+      return { intent: 'ROOM', text: T(c, 'room_ask_nights') };
+    }
+    case 'nights': {
+      const n = Number(text.match(/\d{1,3}/)?.[0]);
+      if (!Number.isInteger(n) || n < 1 || n > 60) return { intent: 'ROOM', text: T(c, 'room_nights_retry') };
+      const user = await db.user.upsert({ where: { phone: c.phone }, update: {}, create: { phone: c.phone } });
+      const reference = `RM-${Date.now()}-${randomInt(10000, 99999)}`;
+      await db.roomBooking.create({ data: { reference, userId: user.id, name: state.name ?? user.name ?? '', phone: c.phone, guests: state.guests ?? 1, nights: n, checkIn: state.checkIn ?? '' } });
+      await writeState(c.conversationId, null);
+      return buttons('ROOM', T(c, 'room_done', { ref: reference, name: state.name ?? '', date: state.checkIn ?? '', guests: state.guests ?? 1, nights: n }), [{ id: 'menu:main', title: T(c, 'b_menu') }]);
+    }
   }
 }
